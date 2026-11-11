@@ -39,7 +39,8 @@ Un volet par appareil (clavier, souris), avec sa batterie.
 - *Réglages* : profil embarqué, mise en veille, économie d'énergie, alerte batterie,
   éclairage dynamique Windows.
 
-**Souris** : effet, couleur et luminosité de la LED, et synchronisation avec le clavier.
+**Souris** : effet, couleur et luminosité de la LED, synchronisation avec le clavier, DPI des
+quatre paliers et fréquence de scrutation.
 
 Deux choses à savoir :
 
@@ -99,8 +100,10 @@ Claude Desktop (`claude_desktop_config.json`) :
 | Couleurs et effets touche par touche, réaction à la frappe | vérifié (environ 15 à 20 images par seconde via le dongle) |
 | Profils par application, atténuation automatique | enregistrement et interface vérifiés ; bascule en conditions réelles peu éprouvée |
 | Souris : lecture de l'état | vérifié (firmware 3.00.17) |
-| Souris : éclairage et synchronisation | écrit d'après le pilote ASUS, **pas encore essayé sur le matériel** |
-| Souris : DPI, fréquence de scrutation, boutons | non pris en charge |
+| Souris : éclairage | commande acquittée et relue sur le matériel ; rendu de la LED à confirmer à l'œil |
+| Souris : DPI des quatre paliers | écriture et relecture vérifiées sur le matériel |
+| Souris : fréquence de scrutation, synchronisation avec le clavier | écrit d'après le pilote ASUS, **pas encore essayé sur le matériel** |
+| Souris : boutons | non pris en charge |
 | Bluetooth | non pris en charge (le clavier n'y accepte que les effets intégrés, pas le touche par touche) |
 | Remappage de touches, macros, réglage de la molette | commandes identifiées, non implémentées |
 | Mise à jour de firmware | hors périmètre, volontairement |

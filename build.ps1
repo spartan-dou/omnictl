@@ -28,7 +28,9 @@ if (-not $root -or -not (Test-Path "$root\aarch64-w64-mingw32\lib\crt2.o")) {
 }
 $root = $root -replace '\\', '/'
 $rt = (Get-ChildItem "$root/lib/clang" -Directory | Sort-Object Name | Select-Object -Last 1).FullName -replace '\\', '/'
-$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+# llvm-mingw dans le chemin : build.rs (icone) est compile pour la machine hote, avec
+# l'editeur de liens par defaut de la toolchain, qui est le clang de llvm-mingw.
+$env:Path = "$env:USERPROFILE\.cargo\bin;$root/bin;$env:Path"
 
 $mode = @()
 $dir = 'debug'

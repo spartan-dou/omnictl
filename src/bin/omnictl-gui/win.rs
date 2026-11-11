@@ -511,12 +511,12 @@ pub fn create_window(title: &str, w: f32, h: f32, dark: bool, visible: bool, pro
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: instance,
-            hIcon: null_mut(),
+            hIcon: LoadIconW(instance, 1 as *const u16), // icône incorporée par build.rs
             hCursor: LoadCursorW(null_mut(), 32512 as *const u16), // IDC_ARROW
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class.as_ptr(),
-            hIconSm: null_mut(),
+            hIconSm: LoadIconW(instance, 1 as *const u16),
         };
         RegisterClassExW(&wc);
         let dpi = GetDpiForSystem();
@@ -745,7 +745,7 @@ fn tray_data(hwnd: HWND, callback: u32, tip: &str) -> NOTIFYICONDATAW {
     data.uID = 1;
     data.uFlags = 0x1 | 0x2 | 0x4; // MESSAGE | ICON | TIP
     data.uCallbackMessage = callback;
-    data.hIcon = unsafe { LoadIconW(null_mut(), 32512 as *const u16) }; // icône d'application standard
+    data.hIcon = unsafe { LoadIconW(GetModuleHandleW(null()), 1 as *const u16) }; // icône de l'application
     for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
         *slot = unit;
     }

@@ -14,7 +14,7 @@ mod win;
 use omnictl::keyfx::{self, Gradient, KeyFx, KeyStyle};
 use omnictl::keys;
 use omnictl::link::{Error, Link, Via};
-use omnictl::mouse::{Mouse, MouseLight, MouseMode};
+use omnictl::mouse::{self, Mouse, MouseLight, MouseMode};
 use omnictl::proto::{self, Connection, Direction, Effect, Keyboard, Mode, Rgb, Speed};
 use omnictl::store;
 use std::cell::RefCell;
@@ -233,6 +233,10 @@ enum Cmd {
     Guard(bool),
     MouseLight(MouseLight),
     MouseSave(MouseLight),
+    /// DPI d'un palier (0 à 3).
+    MouseDpi(usize, u16),
+    /// Index de fréquence de scrutation.
+    MousePolling(usize),
 }
 
 /// Ce que l'interface affiche du clavier.
@@ -258,6 +262,11 @@ struct MouseSnap {
     percent: u8,
     mode: u8,
     level: u8,
+    color: Rgb,
+    dpi: [u16; mouse::DPI_STAGES],
+    /// Palier DPI actif et index de fréquence de scrutation.
+    stage: usize,
+    rate: usize,
 }
 
 #[derive(Default)]
@@ -278,6 +287,10 @@ fn coalesce(batch: Vec<Cmd>) -> Vec<Cmd> {
                 true
             }
             (Some(Cmd::MouseLight(prev)), Cmd::MouseLight(new)) => {
+                *prev = *new;
+                true
+            }
+            (Some(Cmd::MouseDpi(stage, prev)), Cmd::MouseDpi(same, new)) if stage == same => {
                 *prev = *new;
                 true
             }
@@ -382,7 +395,15 @@ impl Devices {
                 let mouse = self.mouse()?;
                 mouse.set_light(light)?;
                 mouse.save()?;
-                Some("Éclairage enregistré dans la souris.")
+                Some("Réglages enregistrés dans la souris.")
+            }
+            Cmd::MouseDpi(stage, dpi) => {
+                self.mouse()?.set_dpi(*stage, *dpi)?;
+                None
+            }
+            Cmd::MousePolling(index) => {
+                self.mouse()?.set_polling(*index)?;
+                Some("Fréquence de scrutation réglée.")
             }
         })
     }
@@ -416,8 +437,23 @@ impl Devices {
 
     /// État de la souris, ou `None` si elle ne répond pas (éteinte, en veille, non appairée).
     fn mouse_snapshot(&mut self) -> Option<MouseSnap> {
-        match self.mouse().and_then(|m| m.status()) {
-            Ok(st) => Some(MouseSnap { firmware: st.firmware, percent: st.percent, mode: st.mode, level: st.level }),
+        let read = self.mouse().and_then(|m| {
+            let st = m.status()?;
+            let dpi = m.dpi()?;
+            let (stage, rate) = m.performance()?;
+            Ok(MouseSnap {
+                firmware: st.firmware,
+                percent: st.percent,
+                mode: st.mode,
+                level: st.level,
+                color: st.color,
+                dpi,
+                stage,
+                rate,
+            })
+        });
+        match read {
+            Ok(snap) => Some(snap),
             Err(_) => {
                 self.mouse = None;
                 None
@@ -760,7 +796,7 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                 Err(e) => {
                     message = Some((e.to_string(), true));
                     // Rouvrir au prochain essai : le périphérique a pu changer de mode.
-                    if matches!(cmd, Cmd::MouseLight(_) | Cmd::MouseSave(_)) {
+                    if matches!(cmd, Cmd::MouseLight(_) | Cmd::MouseSave(_) | Cmd::MouseDpi(..) | Cmd::MousePolling(_)) {
                         dev.mouse = None;
                     } else {
                         dev.kb = None;
@@ -857,6 +893,9 @@ enum Hit {
     MouseColor,
     MouseLevel(u8),
     MouseSave,
+    /// Palier DPI (0 à 3) : diminuer (faux) ou augmenter (vrai).
+    MouseDpi(usize, bool),
+    MousePolling(usize),
     Sync,
     PickSv,
     PickHue,
@@ -932,6 +971,8 @@ impl Ui<'_> {
     }
 
     fn card(&self, r: Rc) {
+        // Ombre portée très légère, comme les cartes de Windows 11.
+        self.c.fill(rc(r.x, r.y + 1.5, r.w, r.h), 6.0, 0x12000000);
         self.c.fill(r, 6.0, self.t.card);
         self.c.stroke(r, 6.0, self.t.card_border, 1.0);
     }
@@ -1111,6 +1152,8 @@ struct App {
     apps: Vec<String>,
     /// Nom de notre propre exécutable, à ignorer.
     own_exe: String,
+    /// Origine du temps pour l'aperçu animé du clavier.
+    start: Instant,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1271,6 +1314,17 @@ impl App {
         }
     }
 
+    /// L'aperçu du clavier a-t-il quelque chose à animer à l'écran ?
+    fn preview_moves(&self) -> bool {
+        self.device == Device::Keyboard
+            && self.tab == Tab::Keys
+            && self.key_styles.iter().any(|(_, s)| match s.fx {
+                KeyFx::Fixed => false,
+                KeyFx::Gradient => self.gradient.scroll,
+                _ => true,
+            })
+    }
+
     /// Retient la dernière application au premier plan autre qu'omnictl.
     fn track_app(&mut self) {
         let Some(exe) = win::foreground_exe() else { return };
@@ -1328,6 +1382,7 @@ impl App {
                     self.mouse_fx.mode = mode;
                 }
                 self.mouse_fx.level = m.level.min(4);
+                self.mouse_fx.color = m.color;
                 self.mouse_synced = true;
             }
         }
@@ -1519,6 +1574,18 @@ impl App {
             Hit::MouseLevel(level) => self.edit_mouse(|m| m.level = level),
             Hit::MouseColor => self.picker = Some(Picker::new(PickTarget::MouseColor, self.mouse_fx.color)),
             Hit::MouseSave => self.send(Cmd::MouseSave(self.mouse_fx)),
+            Hit::MouseDpi(stage, up) => {
+                if let Some(m) = &mut self.mouse {
+                    let step = 100;
+                    let next = if up { m.dpi[stage].saturating_add(step) } else { m.dpi[stage].saturating_sub(step) };
+                    let next = next.clamp(mouse::DPI_MIN, mouse::DPI_MAX);
+                    if next != m.dpi[stage] {
+                        m.dpi[stage] = next; // affichage immédiat ; la souris confirmera à la relecture
+                        self.send(Cmd::MouseDpi(stage, next));
+                    }
+                }
+            }
+            Hit::MousePolling(index) => self.send(Cmd::MousePolling(index)),
             Hit::Sync => {
                 self.sync = !self.sync;
                 let _ = store::set_flag("sync", self.sync);
@@ -1632,22 +1699,29 @@ impl App {
             None => "Non joignable".to_string(),
         };
         let items = [
-            (Device::Keyboard, ICON_KEYBOARD, "Clavier", kb),
-            (Device::Mouse, ICON_MOUSE, "Souris", mouse),
+            (Device::Keyboard, ICON_KEYBOARD, "Clavier", kb, self.snap.as_ref().map(|s| s.percent)),
+            (Device::Mouse, ICON_MOUSE, "Souris", mouse, self.mouse.as_ref().map(|m| m.percent)),
         ];
-        for (i, (device, icon, title, subtitle)) in items.into_iter().enumerate() {
-            let r = rc(8.0, 74.0 + i as f32 * 58.0, NAV - 16.0, 54.0);
+        for (i, (device, icon, title, subtitle, percent)) in items.into_iter().enumerate() {
+            let r = rc(8.0, 74.0 + i as f32 * 62.0, NAV - 16.0, 58.0);
             let hit = Hit::Device(device);
             let selected = self.device == device;
             if selected {
                 ui.c.fill(r, 5.0, t.subtle);
-                ui.c.fill(rc(r.x, r.y + 17.0, 3.0, 20.0), 1.5, t.accent);
+                ui.c.fill(rc(r.x, r.y + 19.0, 3.0, 20.0), 1.5, t.accent);
             } else if ui.hover == Some(hit) {
                 ui.c.fill(r, 5.0, t.hover);
             }
             ui.c.icon(icon, rc(r.x + 10.0, r.y, 36.0, r.h), 19.0, t.text);
             ui.c.text(title, rc(r.x + 52.0, r.y + 8.0, 150.0, 20.0), 14.0, selected, t.text, Align::Left);
-            ui.c.text(&subtitle, rc(r.x + 52.0, r.y + 27.0, 160.0, 18.0), 12.0, false, t.dim, Align::Left);
+            ui.c.text(&subtitle, rc(r.x + 52.0, r.y + 25.0, 160.0, 18.0), 12.0, false, t.dim, Align::Left);
+            // Jauge de batterie : rouge sous 20 %.
+            if let Some(percent) = percent {
+                let track = rc(r.x + 54.0, r.y + 45.0, 96.0, 3.0);
+                ui.c.fill(track, 1.5, t.control_border);
+                let level = track.w * percent.min(100) as f32 / 100.0;
+                ui.c.fill(rc(track.x, track.y, level.max(3.0), track.h), 1.5, if percent < 20 { t.danger } else { t.accent });
+            }
             ui.hit(r, hit);
         }
         ui.c.text(concat!("omnictl ", env!("CARGO_PKG_VERSION")), rc(20.0, H - 36.0, 180.0, 22.0), 12.0, false, t.dim, Align::Left);
@@ -1823,11 +1897,8 @@ impl App {
                 .key_styles
                 .iter()
                 .find(|(id, _)| *id == key.id)
-                .map(|(_, style)| match style.fx {
-                    // Aperçu figé du dégradé à la position de la touche.
-                    KeyFx::Gradient => self.gradient.at(key.rect.0 as f32 / 78.0, 0.0),
-                    _ => style.color,
-                })
+                // L'aperçu s'anime comme le vrai clavier : même calcul, même horloge.
+                .map(|(_, style)| style.at(self.start.elapsed().as_secs_f32(), key.rect.0 as f32, &self.gradient))
                 .filter(|c| *c != Rgb::BLACK);
             let cap = rc(r.x + 2.5, r.y + 2.5, r.w - 5.0, r.h - 5.0);
             let legend_color = match lit {
@@ -2044,21 +2115,32 @@ impl App {
         let y = row(4) + 10.0;
         ui.button(rc(CX, y, 230.0, 34.0), "Enregistrer dans la souris", true, Hit::MouseSave);
         ui.c.text(
-            "La souris n'a qu'une LED : les effets du clavier sans équivalent deviennent une couleur fixe.",
+            "Appliqué en direct ; ce bouton rend l'éclairage, le DPI et la fréquence permanents.",
             rc(CX + 246.0, y, CW - 246.0, 34.0),
             12.5,
             false,
             t.dim,
             Align::Left,
         );
-        ui.c.text(
-            "Réglages de performance (DPI, fréquence) : pas encore pris en charge.",
-            rc(CX, y + 50.0, CW, 22.0),
-            12.5,
-            false,
-            t.dim,
-            Align::Left,
-        );
+        let Some(m) = &self.mouse else { return };
+        ui.heading("Performance", CX, y + 58.0);
+        let top = y + 86.0;
+        ui.card(rc(CX, top, CW, 66.0));
+        let w = CW / mouse::DPI_STAGES as f32;
+        for (i, dpi) in m.dpi.iter().enumerate() {
+            let mid = CX + i as f32 * w + w / 2.0;
+            let active = m.stage == i;
+            let caption = format!("Palier {}{}", i + 1, if active { " · en service" } else { "" });
+            ui.c.text(&caption, rc(mid - w / 2.0, top + 6.0, w, 18.0), 12.0, active, if active { t.accent } else { t.dim }, Align::Center);
+            ui.round_button(mid - 78.0, top + 30.0, 26.0, "−", Hit::MouseDpi(i, false));
+            ui.c.text(&format!("{dpi} DPI"), rc(mid - 50.0, top + 28.0, 100.0, 30.0), 14.0, true, t.text, Align::Center);
+            ui.round_button(mid + 52.0, top + 30.0, 26.0, "+", Hit::MouseDpi(i, true));
+        }
+        let y2 = top + 74.0;
+        let right = ui.setting(y2, ICON_SPEED, "Fréquence de scrutation", "Plus haute : plus réactive, mais plus gourmande en batterie.");
+        let labels: Vec<String> = mouse::POLLING_HZ.iter().map(|hz| format!("{hz} Hz")).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        ui.segmented(right, y2 + ROW / 2.0, 360.0, &labels, Some(m.rate), Hit::MousePolling);
     }
 
     fn draw_picker(&self, ui: &mut Ui) {
@@ -2141,6 +2223,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
         win::WM_TIMER => {
             if wparam == 2 {
                 with_app(|a| a.track_app());
+            } else if wparam == 3 {
+                if with_app(|a| a.preview_moves()) == Some(true) {
+                    win::redraw(hwnd);
+                }
             } else {
                 with_app(|a| a.send(Cmd::Refresh));
             }
@@ -2275,6 +2361,7 @@ fn main() {
         idle: load_idle(),
         locked,
         last_app: None,
+        start: Instant::now(),
         apps: store::list_apps(),
         own_exe: std::env::current_exe()
             .ok()
@@ -2294,5 +2381,6 @@ fn main() {
     win::redraw(hwnd);
     win::set_timer(hwnd, 1, REFRESH_MS);
     win::set_timer(hwnd, 2, 1000); // suivi de l'application au premier plan
+    win::set_timer(hwnd, 3, 50); // aperçu animé du clavier
     win::run_loop();
 }
