@@ -56,41 +56,40 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
+  # Chaque architecture Linux compile sur une machine de son architecture : rien à installer.
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain Rust (x64 + ARM64) et éditeur de liens ARM64
+      - name: Toolchain Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add aarch64-unknown-linux-gnu
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc-aarch64-linux-gnu
 
       - name: Tests
         run: cargo test
 
-      - name: Compilation x64
+      - name: Compilation
         run: cargo build --release --bin omnictl
 
-      - name: Compilation ARM64
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --bin omnictl --target aarch64-unknown-linux-gnu
-
-      - name: Rassembler les exécutables
+      - name: Rassembler les fichiers
         run: |
           mkdir -p dist
-          cp target/release/omnictl dist/omnictl-linux-x64
-          cp target/aarch64-unknown-linux-gnu/release/omnictl dist/omnictl-linux-arm64
+          cp target/release/omnictl dist/omnictl-linux-${{ matrix.arch }}
           cp linux/60-omnictl.rules dist/
           ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: omnictl-linux
+          name: omnictl-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
