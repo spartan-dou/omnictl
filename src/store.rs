@@ -42,8 +42,66 @@ pub fn save_styles(styles: &[(u8, KeyStyle)]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let text: String = styles.iter().map(|(id, style)| format_line(*id, style)).collect();
-    std::fs::write(path, text)
+    std::fs::write(path, styles_text(styles))
+}
+
+fn styles_text(styles: &[(u8, KeyStyle)]) -> String {
+    styles.iter().map(|(id, style)| format_line(*id, style)).collect()
+}
+
+/// Fichier des couleurs associées à une application (`apps\<exécutable>.txt`). Le nom est
+/// réduit à des caractères sûrs : il vient du système, mais finit dans un chemin.
+fn app_file(exe: &str) -> Option<PathBuf> {
+    let name = app_name(exe);
+    if name.is_empty() {
+        return None;
+    }
+    Some(path()?.with_file_name("apps").join(format!("{name}.txt")))
+}
+
+fn app_name(exe: &str) -> String {
+    exe.to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect::<String>()
+        .trim_matches('.')
+        .to_string()
+}
+
+/// Couleurs associées à l'application `exe` (nom de son exécutable), s'il y en a.
+pub fn app_styles(exe: &str) -> Option<Vec<(u8, KeyStyle)>> {
+    let text = std::fs::read_to_string(app_file(exe)?).ok()?;
+    Some(text.lines().filter_map(parse_line).collect())
+}
+
+pub fn save_app(exe: &str, styles: &[(u8, KeyStyle)]) -> std::io::Result<()> {
+    let path = app_file(exe).ok_or_else(|| std::io::Error::other("nom d'application inutilisable"))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, styles_text(styles))
+}
+
+pub fn remove_app(exe: &str) -> std::io::Result<()> {
+    match app_file(exe) {
+        Some(path) if path.exists() => std::fs::remove_file(path),
+        _ => Ok(()),
+    }
+}
+
+/// Applications ayant des couleurs associées, par ordre alphabétique.
+pub fn list_apps() -> Vec<String> {
+    let Some(dir) = path().map(|p| p.with_file_name("apps")) else {
+        return Vec::new();
+    };
+    let mut apps: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| Some(entry.file_name().to_str()?.strip_suffix(".txt")?.to_string()))
+        .collect();
+    apps.sort();
+    apps
 }
 
 /// Couleurs de base seules (sans les effets), pour une application en une fois.
@@ -142,6 +200,14 @@ mod tests {
         assert_eq!(format_line(0x08, &wave), "08=0040ff,w\n");
         assert_eq!(parse_line("2d=ff6000"), Some((0x2d, plain)));
         assert_eq!(parse_line("08=0040ff,w"), Some((0x08, wave)));
+    }
+
+    #[test]
+    fn app_names_are_reduced_to_safe_file_names() {
+        assert_eq!(app_name("Chrome.EXE"), "chrome.exe");
+        assert_eq!(app_name("..\\..\\secret.txt"), "secret.txt");
+        assert_eq!(app_name("a/b:c*d.exe"), "abcd.exe");
+        assert_eq!(app_name("...."), "");
     }
 
     #[test]

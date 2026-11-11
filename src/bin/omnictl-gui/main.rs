@@ -221,6 +221,9 @@ enum Cmd {
     Gradient(Gradient),
     /// Atténuation après tant de minutes d'inactivité du PC (0 = jamais).
     Idle(u32),
+    /// Associe les couleurs actuelles à une application, ou retire l'association.
+    AppSave(String),
+    AppRemove(String),
     Profile(u8),
     Sleep(u8),
     Saving(u8),
@@ -336,7 +339,7 @@ impl Devices {
     fn execute(&mut self, cmd: &Cmd) -> Result<Option<&'static str>, Error> {
         Ok(match cmd {
             // Rien à envoyer ici : les couleurs par touche passent par le moteur.
-            Cmd::Refresh | Cmd::Guard(_) | Cmd::Keys(_) | Cmd::ApplyKeys | Cmd::Live(_) | Cmd::React(_) | Cmd::Gradient(_) | Cmd::Idle(_) => None,
+            Cmd::Refresh | Cmd::Guard(_) | Cmd::Keys(_) | Cmd::ApplyKeys | Cmd::Live(_) | Cmd::React(_) | Cmd::Gradient(_) | Cmd::Idle(_) | Cmd::AppSave(_) | Cmd::AppRemove(_) => None,
             Cmd::Effect(e) => {
                 self.kb()?.set_effect(e)?;
                 None // appliqué en direct : pas de message à chaque retouche
@@ -426,7 +429,14 @@ impl Devices {
 /// Moteur des couleurs touche par touche : calcule l'image courante (effet de chaque touche,
 /// éclair de frappe) et n'envoie au clavier que les LED qui ont changé.
 struct Engine {
+    /// Couleurs affichées en ce moment : celles de l'application au premier plan si elle en
+    /// a, sinon les couleurs générales.
     styles: Vec<(u8, KeyStyle)>,
+    /// Couleurs générales (celles que l'on peint dans l'interface).
+    default: Vec<(u8, KeyStyle)>,
+    /// Application vue au premier plan au dernier contrôle, et instant de ce contrôle.
+    app: Option<String>,
+    app_check: Instant,
     /// Dernière couleur envoyée à chaque LED ; `None` = à (ré)envoyer.
     last: [Option<Rgb>; 256],
     /// Éclair de frappe en cours par LED : 1 à l'appui, retombe à 0.
@@ -457,6 +467,9 @@ impl Engine {
         let now = Instant::now();
         Engine {
             styles: store::load_styles(),
+            default: store::load_styles(),
+            app: None,
+            app_check: now,
             last: [None; 256],
             boost: [0.0; 256],
             flashing: [false; 256],
@@ -508,11 +521,33 @@ impl Engine {
 
     fn merge(&mut self, changes: &[(u8, KeyStyle)]) {
         for &(id, style) in changes {
-            match self.styles.iter_mut().find(|(i, _)| *i == id) {
+            match self.default.iter_mut().find(|(i, _)| *i == id) {
                 Some(slot) => slot.1 = style,
-                None => self.styles.push((id, style)),
+                None => self.default.push((id, style)),
             }
         }
+        self.apply_app();
+    }
+
+    /// Choisit les couleurs à afficher pour l'application courante. Vrai si elles changent.
+    fn apply_app(&mut self) -> bool {
+        let next = self.app.as_deref().and_then(store::app_styles).unwrap_or_else(|| self.default.clone());
+        if next == self.styles {
+            return false;
+        }
+        self.styles = next;
+        self.reset();
+        true
+    }
+
+    /// Regarde quelle application est au premier plan. Vrai si les couleurs changent.
+    fn check_app(&mut self) -> bool {
+        let exe = win::foreground_exe();
+        if exe == self.app {
+            return false;
+        }
+        self.app = exe;
+        self.apply_app()
     }
 
     /// Un pas du moteur : tous les éclairs de frappe, plus une tranche de l'animation.
@@ -552,6 +587,10 @@ impl Engine {
             self.ripples.retain(|(_, _, at)| now.duration_since(*at).as_secs_f32() < keyfx::RIPPLE_SECONDS);
         }
         self.update_dim();
+        if now.duration_since(self.app_check) >= Duration::from_secs(1) {
+            self.app_check = now;
+            self.check_app();
+        }
         let count = keys::KEYS.len();
         let start = self.cursor;
         if !full {
@@ -613,7 +652,9 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
         // prochaine commande.
         let timeout = if engine.animated() && kb_ok {
             Some(FRAME)
-        } else if guard || engine.live {
+        } else if engine.live {
+            Some(Duration::from_secs(1)) // inactivité, application au premier plan
+        } else if guard {
             Some(GUARD_POLL)
         } else {
             None
@@ -640,7 +681,7 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                 continue;
             }
             // Ronde lente : l'atténuation (inactivité, verrouillage) a-t-elle changé ?
-            if engine.live && engine.update_dim() && kb_ok {
+            if engine.live && (engine.update_dim() | engine.check_app()) && kb_ok {
                 let _ = engine.frame(&mut dev);
             }
             let now = dev.kb_reachable();
@@ -681,10 +722,24 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                 Cmd::React(mode) => engine.react = *mode,
                 Cmd::Gradient(gradient) => engine.gradient = gradient.clone(),
                 Cmd::Idle(minutes) => engine.idle_minutes = *minutes,
+                Cmd::AppSave(exe) => {
+                    message = Some(match store::save_app(exe, &engine.default) {
+                        Ok(()) => (format!("Couleurs actuelles associées à {exe}."), false),
+                        Err(e) => (format!("Association impossible : {e}"), true),
+                    });
+                    engine.apply_app();
+                }
+                Cmd::AppRemove(exe) => {
+                    message = Some(match store::remove_app(exe) {
+                        Ok(()) => (format!("{exe} n'a plus de couleurs associées."), false),
+                        Err(e) => (format!("Retrait impossible : {e}"), true),
+                    });
+                    engine.apply_app();
+                }
                 Cmd::Keys(changes) => {
                     engine.merge(changes);
                     engine.live = true;
-                    if let Err(e) = store::save_styles(&engine.styles) {
+                    if let Err(e) = store::save_styles(&engine.default) {
                         message = Some((format!("Couleurs appliquées mais non mémorisées : {e}"), true));
                     }
                 }
@@ -756,6 +811,7 @@ enum Device {
 enum Tab {
     Light,
     Keys,
+    Apps,
     Settings,
 }
 
@@ -782,6 +838,9 @@ enum Hit {
     GradStop(usize),
     GradScroll,
     Idle(u32),
+    AppSave,
+    /// Retire l'association de l'application n° i de la liste.
+    AppRemove(usize),
     Key(u8),
     Fill,
     Clear,
@@ -1047,6 +1106,11 @@ struct App {
     idle: u32,
     /// Session Windows verrouillée (lu par le moteur).
     locked: Arc<AtomicBool>,
+    /// Dernière application vue au premier plan (hors omnictl), et celles qui ont des couleurs.
+    last_app: Option<String>,
+    apps: Vec<String>,
+    /// Nom de notre propre exécutable, à ignorer.
+    own_exe: String,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1203,6 +1267,17 @@ impl App {
             None => {
                 self.key_styles.push((id, style));
                 true
+            }
+        }
+    }
+
+    /// Retient la dernière application au premier plan autre qu'omnictl.
+    fn track_app(&mut self) {
+        let Some(exe) = win::foreground_exe() else { return };
+        if exe != self.own_exe && self.last_app.as_ref() != Some(&exe) {
+            self.last_app = Some(exe);
+            if self.tab == Tab::Apps {
+                win::redraw(self.hwnd);
             }
         }
     }
@@ -1402,6 +1477,21 @@ impl App {
                 self.send(Cmd::React(mode));
             }
             Hit::GradStop(i) => self.picker = Some(Picker::new(PickTarget::Gradient(i), self.gradient.stops[i])),
+            Hit::AppSave => {
+                if let Some(exe) = self.last_app.clone() {
+                    if !self.apps.contains(&exe) {
+                        self.apps.push(exe.clone());
+                        self.apps.sort();
+                    }
+                    self.send(Cmd::AppSave(exe));
+                }
+            }
+            Hit::AppRemove(i) => {
+                if i < self.apps.len() {
+                    let exe = self.apps.remove(i);
+                    self.send(Cmd::AppRemove(exe));
+                }
+            }
             Hit::GradScroll => {
                 self.gradient.scroll = !self.gradient.scroll;
                 self.push_gradient();
@@ -1511,6 +1601,7 @@ impl App {
                 match tab {
                     Tab::Light => self.draw_light(&mut ui),
                     Tab::Keys => self.draw_keys(&mut ui),
+                    Tab::Apps => self.draw_apps(&mut ui),
                     Tab::Settings => self.draw_settings(&mut ui),
                 }
             }
@@ -1579,7 +1670,7 @@ impl App {
         let color = if self.snap.is_some() { t.dim } else { t.danger };
         ui.c.text(&status, rc(CX + 300.0, 30.0, CW - 300.0, 30.0), 13.0, false, color, Align::Right);
 
-        let tabs = [(Tab::Light, "Éclairage"), (Tab::Keys, "Touche par touche"), (Tab::Settings, "Réglages")];
+        let tabs = [(Tab::Light, "Éclairage"), (Tab::Keys, "Touche par touche"), (Tab::Apps, "Applications"), (Tab::Settings, "Réglages")];
         let mut x = CX;
         for (tab, label) in tabs {
             let active = self.tab == tab;
@@ -1822,6 +1913,47 @@ impl App {
         ui.segmented(right, y + ROW / 2.0, 300.0, &["Jamais", "1 min", "5 min", "15 min"], selected, |i| Hit::Idle(delays[i]));
     }
 
+    fn draw_apps(&self, ui: &mut Ui) {
+        let t = &self.theme;
+        let y = 126.0;
+        let right = ui.setting(
+            y,
+            ICON_WINDOWS,
+            "Dernière application utilisée",
+            self.last_app.as_deref().unwrap_or("Passez sur une autre application, puis revenez ici."),
+        );
+        if self.last_app.is_some() {
+            ui.button(rc(right - 270.0, y + 10.0, 270.0, 32.0), "Lui associer les couleurs actuelles", true, Hit::AppSave);
+        }
+
+        ui.heading("Applications associées", CX, y + STEP + 16.0);
+        let top = y + STEP + 44.0;
+        if self.apps.is_empty() {
+            ui.c.text("Aucune pour l'instant.", rc(CX, top, CW, 24.0), 13.0, false, t.dim, Align::Left);
+        }
+        for (i, exe) in self.apps.iter().enumerate().take(7) {
+            let y = top + i as f32 * STEP;
+            let right = ui.setting(y, ICON_PIN, exe, "");
+            ui.button(rc(right - 110.0, y + 10.0, 110.0, 32.0), "Retirer", false, Hit::AppRemove(i));
+        }
+        ui.c.text(
+            "Quand une de ces applications passe au premier plan, le clavier prend les couleurs touche par touche",
+            rc(CX, H - 84.0, CW, 20.0),
+            12.5,
+            false,
+            t.dim,
+            Align::Left,
+        );
+        ui.c.text(
+            "qui lui sont associées ; ailleurs, il revient aux couleurs générales. omnictl doit rester ouvert.",
+            rc(CX, H - 64.0, CW, 20.0),
+            12.5,
+            false,
+            t.dim,
+            Align::Left,
+        );
+    }
+
     fn draw_settings(&self, ui: &mut Ui) {
         let t = &self.theme;
         let s = self.snap.as_ref();
@@ -2007,7 +2139,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
             0
         }
         win::WM_TIMER => {
-            with_app(|a| a.send(Cmd::Refresh));
+            if wparam == 2 {
+                with_app(|a| a.track_app());
+            } else {
+                with_app(|a| a.send(Cmd::Refresh));
+            }
             0
         }
         WM_UPDATE => {
@@ -2116,6 +2252,8 @@ fn main() {
         device: if has("mouse") { Device::Mouse } else { Device::Keyboard },
         tab: if has("keys") {
             Tab::Keys
+        } else if has("apps") {
+            Tab::Apps
         } else if has("settings") {
             Tab::Settings
         } else {
@@ -2136,6 +2274,12 @@ fn main() {
         gradient: store::gradient(),
         idle: load_idle(),
         locked,
+        last_app: None,
+        apps: store::list_apps(),
+        own_exe: std::env::current_exe()
+            .ok()
+            .and_then(|p| Some(p.file_name()?.to_str()?.to_lowercase()))
+            .unwrap_or_default(),
         legends: keys::layout_legends(),
         low_edit: None,
         guard,
@@ -2149,5 +2293,6 @@ fn main() {
     APP.with(|cell| *cell.borrow_mut() = Some(app));
     win::redraw(hwnd);
     win::set_timer(hwnd, 1, REFRESH_MS);
+    win::set_timer(hwnd, 2, 1000); // suivi de l'application au premier plan
     win::run_loop();
 }

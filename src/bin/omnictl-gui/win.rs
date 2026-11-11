@@ -818,3 +818,45 @@ pub fn set_autostart(name: &str, command: Option<&str>) -> bool {
     };
     status == 0
 }
+
+// ───────────── Application au premier plan ─────────────
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetForegroundWindow() -> HWND;
+    fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut u32) -> u32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
+    fn QueryFullProcessImageNameW(process: HANDLE, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+    fn CloseHandle(handle: HANDLE) -> i32;
+}
+
+/// Nom de l'exécutable (en minuscules, sans chemin) de la fenêtre au premier plan.
+/// `None` s'il n'y en a pas ou si Windows ne laisse pas l'interroger.
+pub fn foreground_exe() -> Option<String> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let process = OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if process.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(process);
+        if ok == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let name = path.rsplit(['\\', '/']).next()?.to_lowercase();
+        (!name.is_empty()).then_some(name)
+    }
+}
