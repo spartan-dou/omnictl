@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use crate::install;
 use crate::update;
 use crate::win::{self, rc, Align, Canvas, Rc, HWND};
 
@@ -40,6 +41,8 @@ const WM_TRAY: u32 = win::WM_APP + 2;
 const WM_SHOW: u32 = win::WM_APP + 3;
 /// La mise à jour est en place : relancer l'application.
 const WM_RESTART: u32 = win::WM_APP + 4;
+/// Fermeture complète demandée de l'extérieur (désinstallation).
+const WM_QUIT_APP: u32 = win::WM_APP + 5;
 const REFRESH_MS: u32 = 20_000;
 /// Intervalle des rondes du gardien.
 const GUARD_POLL: Duration = Duration::from_secs(3);
@@ -898,6 +901,8 @@ enum Hit {
     MouseSave,
     /// Installer la mise à jour proposée.
     Update,
+    /// Installer l'application sur ce PC.
+    Install,
     /// Palier DPI (0 à 3) : diminuer (faux) ou augmenter (vrai).
     MouseDpi(usize, bool),
     MousePolling(usize),
@@ -1162,6 +1167,8 @@ struct App {
     /// Version plus récente disponible, et installation en cours.
     update: Option<String>,
     updating: bool,
+    /// L'application tourne depuis son dossier d'installation.
+    installed: bool,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1581,6 +1588,15 @@ impl App {
             Hit::MouseLevel(level) => self.edit_mouse(|m| m.level = level),
             Hit::MouseColor => self.picker = Some(Picker::new(PickTarget::MouseColor, self.mouse_fx.color)),
             Hit::MouseSave => self.send(Cmd::MouseSave(self.mouse_fx)),
+            Hit::Install => match install::install() {
+                Ok(exe) => {
+                    // Passer la main à la copie installée.
+                    let _ = std::process::Command::new(exe).arg("--after-update").spawn();
+                    win::destroy_window(self.hwnd);
+                    return;
+                }
+                Err(e) => (self.message, self.is_error) = (format!("Installation impossible : {e}"), true),
+            },
             Hit::Update => {
                 if !self.updating {
                     self.updating = true;
@@ -1753,6 +1769,10 @@ impl App {
         if let Some(version) = &self.update {
             let label = if self.updating { "Mise à jour en cours…".to_string() } else { format!("Installer la version {version}") };
             ui.button(rc(12.0, H - 80.0, NAV - 24.0, 34.0), &label, true, Hit::Update);
+        }
+        if !self.installed {
+            let y = if self.update.is_some() { H - 122.0 } else { H - 80.0 };
+            ui.button(rc(12.0, y, NAV - 24.0, 34.0), "Installer sur ce PC", false, Hit::Install);
         }
     }
 
@@ -2281,6 +2301,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
             win::show_window(hwnd, true);
             0
         }
+        WM_QUIT_APP => {
+            win::destroy_window(hwnd);
+            0
+        }
         WM_RESTART => {
             // La nouvelle version est en place : la lancer, puis fermer celle-ci.
             if let Ok(exe) = std::env::current_exe() {
@@ -2349,10 +2373,16 @@ pub fn main() {
         // Laisser à l'ancienne version le temps de se fermer et de libérer son verrou.
         std::thread::sleep(Duration::from_millis(1500));
     }
+    if has("--uninstall") {
+        win::close_running(WM_QUIT_APP);
+        install::uninstall();
+        return;
+    }
     if win::already_running(WM_SHOW) {
         return; // l'instance déjà ouverte vient au premier plan
     }
     update::cleanup();
+    install::refresh_version();
     // `--background` : lancé à l'ouverture de session par le gardien, sans montrer la fenêtre.
     let hwnd = win::create_window("omnictl", W, H, dark, !(has("--background") && guard), wndproc);
     if hwnd.is_null() {
@@ -2422,6 +2452,7 @@ pub fn main() {
         start: Instant::now(),
         update: None,
         updating: false,
+        installed: install::is_installed(),
         apps: store::list_apps(),
         own_exe: std::env::current_exe()
             .ok()

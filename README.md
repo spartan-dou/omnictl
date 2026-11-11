@@ -26,6 +26,12 @@ Les exécutables sont sur la page [Releases](../../releases) :
 
 Les exécutables Windows ne sont pas signés : voir [Smart App Control](#smart-app-control).
 
+**Installation** : lancez `omnictl-gui-x64.exe` (ou `-arm64`), puis « Installer sur ce PC » en bas
+à gauche. Aucun droit administrateur : l'application se copie dans
+`%LOCALAPPDATA%\Programs\omnictl`, ajoute un raccourci au menu Démarrer et apparaît dans
+« Applications installées », d'où elle se désinstalle. Vos réglages (`%APPDATA%\omnictl`) sont
+conservés à la désinstallation. Elle fonctionne aussi sans être installée.
+
 L'interface vérifie au démarrage si une version plus récente est publiée ici et propose de
 l'installer : un clic télécharge les fichiers, contrôle leur empreinte SHA-256, les remplace
 et relance l'application. Rien n'est installé sans ce clic.

@@ -6,6 +6,8 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod install;
+#[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod win;

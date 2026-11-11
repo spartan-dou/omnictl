@@ -930,3 +930,108 @@ pub fn sha256(data: &[u8]) -> Option<[u8; 32]> {
         (status == 0).then_some(out)
     }
 }
+
+// ───────────── Installation : raccourci du menu Démarrer, registre, confirmation ─────────────
+
+#[repr(C)]
+struct ComGuid {
+    d1: u32,
+    d2: u16,
+    d3: u16,
+    d4: [u8; 8],
+}
+
+const CLSID_SHELL_LINK: ComGuid = ComGuid { d1: 0x0002_1401, d2: 0, d3: 0, d4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
+const IID_SHELL_LINK_W: ComGuid = ComGuid { d1: 0x0002_14F9, d2: 0, d3: 0, d4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
+const IID_PERSIST_FILE: ComGuid = ComGuid { d1: 0x0000_010B, d2: 0, d3: 0, d4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoInitializeEx(reserved: *mut c_void, model: u32) -> i32;
+    fn CoCreateInstance(class: *const ComGuid, outer: *mut c_void, context: u32, iid: *const ComGuid, out: *mut *mut c_void) -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegDeleteTreeW(key: HANDLE, subkey: *const u16) -> i32;
+}
+
+/// Appelle la méthode n° `index` d'un objet COM (table de fonctions en tête de l'objet).
+unsafe fn com_method(object: *mut c_void, index: usize) -> *const c_void {
+    *(*(object as *const *const *const c_void)).add(index)
+}
+
+/// Crée un raccourci `.lnk` vers `target` (interfaces IShellLinkW et IPersistFile).
+pub fn create_shortcut(link: &std::path::Path, target: &std::path::Path, description: &str) -> bool {
+    type SetText = unsafe extern "system" fn(*mut c_void, *const u16) -> i32;
+    type Query = unsafe extern "system" fn(*mut c_void, *const ComGuid, *mut *mut c_void) -> i32;
+    type Release = unsafe extern "system" fn(*mut c_void) -> u32;
+    type Save = unsafe extern "system" fn(*mut c_void, *const u16, i32) -> i32;
+    let (Some(link), Some(target)) = (link.to_str(), target.to_str()) else { return false };
+    unsafe {
+        CoInitializeEx(null_mut(), 2); // appartement à un seul fil ; sans effet si déjà fait
+        let mut shell_link = null_mut();
+        if CoCreateInstance(&CLSID_SHELL_LINK, null_mut(), 1, &IID_SHELL_LINK_W, &mut shell_link) != 0 {
+            return false;
+        }
+        let release: Release = std::mem::transmute(com_method(shell_link, 2));
+        let set_description: SetText = std::mem::transmute(com_method(shell_link, 7));
+        let set_path: SetText = std::mem::transmute(com_method(shell_link, 20));
+        set_path(shell_link, wide(target).as_ptr());
+        set_description(shell_link, wide(description).as_ptr());
+        let query: Query = std::mem::transmute(com_method(shell_link, 0));
+        let mut file = null_mut();
+        let mut saved = false;
+        if query(shell_link, &IID_PERSIST_FILE, &mut file) == 0 {
+            let save: Save = std::mem::transmute(com_method(file, 6));
+            saved = save(file, wide(link).as_ptr(), 1) == 0;
+            let release_file: Release = std::mem::transmute(com_method(file, 2));
+            release_file(file);
+        }
+        release(shell_link);
+        saved
+    }
+}
+
+const HKCU: usize = 0x8000_0001;
+
+/// Écrit une valeur texte dans la branche de registre de l'utilisateur.
+pub fn reg_set_str(subkey: &str, name: &str, value: &str) -> bool {
+    let data = wide(value);
+    unsafe {
+        RegSetKeyValueW(HKCU as HANDLE, wide(subkey).as_ptr(), wide(name).as_ptr(), 1, data.as_ptr() as *const c_void, (data.len() * 2) as u32) == 0
+    }
+}
+
+/// Écrit une valeur numérique dans la branche de registre de l'utilisateur.
+pub fn reg_set_u32(subkey: &str, name: &str, value: u32) -> bool {
+    unsafe {
+        RegSetKeyValueW(HKCU as HANDLE, wide(subkey).as_ptr(), wide(name).as_ptr(), 4, &value as *const u32 as *const c_void, 4) == 0
+    }
+}
+
+/// Supprime une clé de la branche de registre de l'utilisateur, avec tout son contenu.
+pub fn reg_delete_tree(subkey: &str) {
+    unsafe { RegDeleteTreeW(HKCU as HANDLE, wide(subkey).as_ptr()) };
+}
+
+/// Question Oui / Non. Vrai si l'utilisateur répond Oui.
+pub fn confirm(text: &str) -> bool {
+    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("omnictl").as_ptr(), 0x24) == 6 }
+}
+
+/// Lance un programme sans fenêtre de console.
+pub fn spawn_hidden(program: &str, args: &[&str]) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new(program).args(args).creation_flags(0x0800_0000).spawn(); // CREATE_NO_WINDOW
+}
+
+/// Demande à l'instance déjà ouverte de se fermer complètement.
+pub fn close_running(quit_msg: u32) {
+    unsafe {
+        let existing = FindWindowW(wide("omnictl").as_ptr(), null());
+        if !existing.is_null() {
+            PostMessageW(existing, quit_msg, 0, 0);
+        }
+    }
+}
