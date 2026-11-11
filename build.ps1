@@ -49,7 +49,10 @@ try {
         $flags = @(
             '-Clinker=rust-lld', '-Clinker-flavor=ld.lld', '-Clink-self-contained=no',
             "-Lnative=$static", "-Lnative=$lib",
-            "-Clink-arg=$lib/crt2.o", "-Clink-arg=$lib/crtbegin.o",
+            # crt2.o doit preceder les bibliotheques : passe en "-l" verbatim, il est place en
+            # tete (un -Clink-arg arriverait en fin de ligne, apres libmingw32, d'ou un
+            # symbole atexit defini deux fois pour l'executable graphique).
+            '-ldylib:+verbatim=crt2.o', "-Clink-arg=$lib/crtbegin.o",
             "-Clink-arg=$rt/lib/windows/libclang_rt.builtins-$arch.a",
             "-Clink-arg=$lib/crtend.o"
         )
@@ -65,6 +68,7 @@ try {
         $name = 'x64'
         if ($arch -eq 'aarch64') { $name = 'arm64' }
         Copy-Item "target\$t\$dir\scope96.exe" "dist\scope96-$name.exe" -Force
+        Copy-Item "target\$t\$dir\scope96-gui.exe" "dist\scope96-gui-$name.exe" -Force
     }
     Get-ChildItem dist\*.exe | Select-Object Name, Length
 } finally {

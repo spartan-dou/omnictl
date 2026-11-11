@@ -1,13 +1,6 @@
-﻿mod hid;
-mod json;
-mod keys;
-mod link;
-mod mcp;
-mod proto;
-mod store;
-
-use link::{Error, Link, Via};
-use proto::{Direction, Effect, Keyboard, Mode, Rgb, Speed};
+use scope96::link::{self, Error, Link, Via};
+use scope96::proto::{self, Direction, Effect, Keyboard, Mode, Rgb, Speed};
+use scope96::{keys, mcp, store};
 
 const USAGE: &str = "\
 scope96 — contrôle du clavier ASUS ROG Strix Scope II 96 Wireless
