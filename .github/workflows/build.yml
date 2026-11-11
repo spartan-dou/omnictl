@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # CRT statique : les exécutables ne dépendent d'aucune DLL à installer.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain Rust (x64 + ARM64)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+      - name: Tests
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Compilation x64
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Compilation ARM64
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Rassembler les exécutables
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/scope96.exe dist/scope96-x64.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/scope96-gui.exe dist/scope96-gui-x64.exe
+          Copy-Item target/aarch64-pc-windows-msvc/release/scope96.exe dist/scope96-arm64.exe
+          Copy-Item target/aarch64-pc-windows-msvc/release/scope96-gui.exe dist/scope96-gui-arm64.exe
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scope96-windows
+          path: dist/*.exe
+          if-no-files-found: error
