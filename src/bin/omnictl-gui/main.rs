@@ -11,13 +11,14 @@
 
 mod win;
 
-use omnictl::keyfx::{self, KeyFx, KeyStyle};
+use omnictl::keyfx::{self, Gradient, KeyFx, KeyStyle};
 use omnictl::keys;
 use omnictl::link::{Error, Link, Via};
 use omnictl::mouse::{Mouse, MouseLight, MouseMode};
 use omnictl::proto::{self, Connection, Direction, Effect, Keyboard, Mode, Rgb, Speed};
 use omnictl::store;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,6 +48,24 @@ const FRAME: Duration = Duration::from_millis(5);
 /// dongle). Tout le clavier est ainsi repeint en quatre pas, sans jamais bloquer le moteur
 /// plus de quelques millisecondes : un éclair de frappe n'attend pas.
 const SLICE: usize = 28;
+/// Luminosité restante quand le PC est inactif.
+const IDLE_DIM: f32 = 0.15;
+/// Réaction à la frappe : 0 = aucune, 1 = éclair sur la touche, 2 = onde autour d'elle.
+const REACT_FLASH: u8 = 1;
+const REACT_RIPPLE: u8 = 2;
+
+fn load_react() -> u8 {
+    match store::value("react").as_deref() {
+        None => 0,
+        Some("2") => REACT_RIPPLE,
+        Some(_) => REACT_FLASH, // y compris l'ancien fichier témoin vide
+    }
+}
+
+fn load_idle() -> u32 {
+    store::value("idle").and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
 const TRAY_TIP: &str = "omnictl — gardien des couleurs du clavier";
 
 const PRESETS: [Rgb; 10] = [
@@ -197,8 +216,11 @@ enum Cmd {
     /// Les couleurs par touche sont-elles ce que le clavier doit afficher ? (Faux dès qu'un
     /// effet intégré est appliqué.)
     Live(bool),
-    /// Éclair à la frappe.
-    React(bool),
+    /// Réaction à la frappe (0, [`REACT_FLASH`] ou [`REACT_RIPPLE`]).
+    React(u8),
+    Gradient(Gradient),
+    /// Atténuation après tant de minutes d'inactivité du PC (0 = jamais).
+    Idle(u32),
     Profile(u8),
     Sleep(u8),
     Saving(u8),
@@ -314,7 +336,7 @@ impl Devices {
     fn execute(&mut self, cmd: &Cmd) -> Result<Option<&'static str>, Error> {
         Ok(match cmd {
             // Rien à envoyer ici : les couleurs par touche passent par le moteur.
-            Cmd::Refresh | Cmd::Guard(_) | Cmd::Keys(_) | Cmd::ApplyKeys | Cmd::Live(_) | Cmd::React(_) => None,
+            Cmd::Refresh | Cmd::Guard(_) | Cmd::Keys(_) | Cmd::ApplyKeys | Cmd::Live(_) | Cmd::React(_) | Cmd::Gradient(_) | Cmd::Idle(_) => None,
             Cmd::Effect(e) => {
                 self.kb()?.set_effect(e)?;
                 None // appliqué en direct : pas de message à chaque retouche
@@ -413,7 +435,17 @@ struct Engine {
     flashing: [bool; 256],
     /// Les couleurs par touche sont ce que le clavier doit afficher.
     live: bool,
-    react: bool,
+    react: u8,
+    /// Touches enfoncées au pas précédent, pour repérer les nouveaux appuis.
+    down: [bool; 256],
+    /// Ondes de frappe en cours : centre (en quarts de touche) et instant de l'appui.
+    ripples: Vec<(f32, f32, Instant)>,
+    gradient: Gradient,
+    /// Atténuation automatique : délai en minutes (0 = jamais) et facteur de luminosité courant.
+    idle_minutes: u32,
+    dim: f32,
+    /// Session Windows verrouillée (tenu à jour par la fenêtre).
+    locked: Arc<AtomicBool>,
     start: Instant,
     tick: Instant,
     /// Première touche de la prochaine tranche d'animation.
@@ -421,7 +453,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(live: bool) -> Engine {
+    fn new(live: bool, locked: Arc<AtomicBool>) -> Engine {
         let now = Instant::now();
         Engine {
             styles: store::load_styles(),
@@ -429,7 +461,13 @@ impl Engine {
             boost: [0.0; 256],
             flashing: [false; 256],
             live,
-            react: store::flag("react"),
+            react: load_react(),
+            down: [false; 256],
+            ripples: Vec::new(),
+            gradient: store::gradient(),
+            idle_minutes: load_idle(),
+            dim: 1.0,
+            locked,
             start: now,
             tick: now,
             cursor: 0,
@@ -438,7 +476,29 @@ impl Engine {
 
     /// Faut-il recalculer en continu ? (Sinon une seule image suffit.)
     fn animated(&self) -> bool {
-        self.live && (self.react || self.styles.iter().any(|(_, s)| s.fx != KeyFx::Fixed))
+        let moves = |fx: KeyFx| match fx {
+            KeyFx::Fixed => false,
+            KeyFx::Gradient => self.gradient.scroll,
+            _ => true,
+        };
+        self.live && (self.react != 0 || self.styles.iter().any(|(_, s)| moves(s.fx)))
+    }
+
+    /// Recalcule l'atténuation : éteint si la session est verrouillée, lumière réduite si le
+    /// PC est inactif depuis le délai choisi. Renvoie vrai si elle vient de changer.
+    fn update_dim(&mut self) -> bool {
+        let target = if self.idle_minutes == 0 {
+            1.0
+        } else if self.locked.load(Ordering::Relaxed) {
+            0.0
+        } else if win::idle_seconds() >= self.idle_minutes * 60 {
+            IDLE_DIM
+        } else {
+            1.0
+        };
+        let changed = target != self.dim;
+        self.dim = target;
+        changed
     }
 
     /// Tout renvoyer à la prochaine image (clavier réveillé, rebranché, ou effet écrasé).
@@ -471,14 +531,27 @@ impl Engine {
         let dt = now.duration_since(self.tick).as_secs_f32();
         self.tick = now;
         let t = now.duration_since(self.start).as_secs_f32();
-        if self.react {
+        if self.react != 0 {
             for b in self.boost.iter_mut() {
                 *b = (*b - dt / keyfx::FLASH_SECONDS).max(0.0);
             }
+            let mut down = [false; 256];
             for id in keys::pressed() {
-                self.boost[id as usize] = 1.0;
+                down[id as usize] = true;
+                if self.react == REACT_FLASH {
+                    self.boost[id as usize] = 1.0;
+                } else if !self.down[id as usize] {
+                    // Nouvel appui : une onde part du centre de la touche.
+                    if let Some(key) = keys::KEYS.iter().find(|k| k.id == id) {
+                        let (x, y, w, h) = key.rect;
+                        self.ripples.push((x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0, now));
+                    }
+                }
             }
+            self.down = down;
+            self.ripples.retain(|(_, _, at)| now.duration_since(*at).as_secs_f32() < keyfx::RIPPLE_SECONDS);
         }
+        self.update_dim();
         let count = keys::KEYS.len();
         let start = self.cursor;
         if !full {
@@ -489,7 +562,21 @@ impl Engine {
             let in_slice = full || (index + count - start) % count < SLICE;
             // Seules les touches colorées sont pilotées ; les autres gardent ce qu'elles ont.
             let Some((_, style)) = self.styles.iter().find(|(id, _)| *id == key.id) else { continue };
-            let boost = if self.react { self.boost[key.id as usize] } else { 0.0 };
+            let boost = match self.react {
+                0 => 0.0,
+                REACT_FLASH => self.boost[key.id as usize],
+                _ => {
+                    let (x, y, w, h) = key.rect;
+                    let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+                    self.ripples
+                        .iter()
+                        .map(|(rx, ry, at)| {
+                            let dist = ((cx - rx).powi(2) + (cy - ry).powi(2)).sqrt();
+                            keyfx::ripple(now.duration_since(*at).as_secs_f32(), dist)
+                        })
+                        .fold(0.0, f32::max)
+                }
+            };
             // Hors de la tranche, on ne touche qu'aux éclairs en cours ou tout juste finis
             // (ces derniers doivent retrouver la couleur de leur effet sans attendre).
             let flashing = boost > 0.0 || self.flashing[key.id as usize];
@@ -497,7 +584,8 @@ impl Engine {
                 continue;
             }
             self.flashing[key.id as usize] = boost > 0.0;
-            let color = keyfx::flash(style.at(t, key.rect.0 as f32), boost);
+            let color = keyfx::flash(style.at(t, key.rect.0 as f32, &self.gradient), boost);
+            let color = mix(Rgb::BLACK, color, self.dim);
             if self.last[key.id as usize] != Some(color) {
                 leds.push((key.id, color));
             }
@@ -513,10 +601,10 @@ impl Engine {
     }
 }
 
-fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard: bool) {
+fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard: bool, locked: Arc<AtomicBool>) {
     let mut dev = Devices::default();
     // Avec le gardien, les couleurs par touche sont posées dès le démarrage.
-    let mut engine = Engine::new(guard);
+    let mut engine = Engine::new(guard, locked);
     // Le clavier répondait-il au dernier contact ? Faux au départ : premier envoi complet.
     let mut kb_ok = false;
     loop {
@@ -550,6 +638,10 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                     engine.reset();
                 }
                 continue;
+            }
+            // Ronde lente : l'atténuation (inactivité, verrouillage) a-t-elle changé ?
+            if engine.live && engine.update_dim() && kb_ok {
+                let _ = engine.frame(&mut dev);
             }
             let now = dev.kb_reachable();
             if now && !kb_ok {
@@ -586,7 +678,9 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                     engine.live = *on;
                     engine.reset();
                 }
-                Cmd::React(on) => engine.react = *on,
+                Cmd::React(mode) => engine.react = *mode,
+                Cmd::Gradient(gradient) => engine.gradient = gradient.clone(),
+                Cmd::Idle(minutes) => engine.idle_minutes = *minutes,
                 Cmd::Keys(changes) => {
                     engine.merge(changes);
                     engine.live = true;
@@ -683,7 +777,11 @@ enum Hit {
     CustomBrush,
     /// Effet posé par le pinceau.
     BrushFx(KeyFx),
-    React,
+    React(u8),
+    /// Couleur n° i du dégradé.
+    GradStop(usize),
+    GradScroll,
+    Idle(u32),
     Key(u8),
     Fill,
     Clear,
@@ -714,6 +812,7 @@ enum PickTarget {
     EffectColor(usize),
     Brush,
     MouseColor,
+    Gradient(usize),
 }
 
 /// Sélecteur de couleur intégré (teinte / saturation / luminosité), affiché par-dessus la page.
@@ -941,8 +1040,13 @@ struct App {
     brush_fx: KeyFx,
     custom_brush: Rgb,
     key_styles: Vec<(u8, KeyStyle)>,
-    /// Éclair à la frappe sur les touches colorées.
-    react: bool,
+    /// Réaction à la frappe sur les touches colorées (0, éclair ou onde).
+    react: u8,
+    gradient: Gradient,
+    /// Atténuation automatique : minutes d'inactivité (0 = jamais).
+    idle: u32,
+    /// Session Windows verrouillée (lu par le moteur).
+    locked: Arc<AtomicBool>,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1103,6 +1207,11 @@ impl App {
         }
     }
 
+    fn push_gradient(&self) {
+        let _ = store::set_gradient(&self.gradient);
+        self.send(Cmd::Gradient(self.gradient.clone()));
+    }
+
     /// Ce que le pinceau pose sur une touche.
     fn brush_style(&self) -> KeyStyle {
         KeyStyle { color: self.brush, fx: self.brush_fx }
@@ -1179,6 +1288,12 @@ impl App {
             PickTarget::MouseColor => {
                 if self.mouse_fx.color != color {
                     self.edit_mouse(|m| m.color = color);
+                }
+            }
+            PickTarget::Gradient(i) => {
+                if self.gradient.stops.get(i).is_some_and(|c| *c != color) {
+                    self.gradient.stops[i] = color;
+                    self.push_gradient();
                 }
             }
             PickTarget::Brush => {}
@@ -1277,10 +1392,24 @@ impl App {
             Hit::Fill => self.paint_all(self.brush_style()),
             Hit::Clear => self.paint_all(KeyStyle::fixed(Rgb::BLACK)),
             Hit::BrushFx(fx) => self.brush_fx = fx,
-            Hit::React => {
-                self.react = !self.react;
-                let _ = store::set_flag("react", self.react);
-                self.send(Cmd::React(self.react));
+            Hit::React(mode) => {
+                self.react = mode;
+                let _ = if mode == 0 {
+                    store::set_flag("react", false)
+                } else {
+                    store::set_value("react", &mode.to_string())
+                };
+                self.send(Cmd::React(mode));
+            }
+            Hit::GradStop(i) => self.picker = Some(Picker::new(PickTarget::Gradient(i), self.gradient.stops[i])),
+            Hit::GradScroll => {
+                self.gradient.scroll = !self.gradient.scroll;
+                self.push_gradient();
+            }
+            Hit::Idle(minutes) => {
+                self.idle = minutes;
+                let _ = store::set_value("idle", &minutes.to_string());
+                self.send(Cmd::Idle(minutes));
             }
             Hit::Reapply => self.send(Cmd::ApplyKeys),
             Hit::Guard => self.set_guard(!self.guard),
@@ -1554,16 +1683,19 @@ impl App {
         let t = &self.theme;
         ui.heading("Pinceau : une couleur et un effet par touche", CX, 124.0);
         for (i, color) in PRESETS.iter().enumerate() {
-            ui.swatch(CX + 2.0 + i as f32 * 34.0, 151.0, 26.0, *color, self.brush == *color, Hit::Preset(i));
+            ui.swatch(CX + 2.0 + i as f32 * 30.0, 152.0, 24.0, *color, self.brush == *color, Hit::Preset(i));
         }
-        let other = rc(CX + 10.0 * 34.0 + 8.0, 148.0, 112.0, 32.0);
-        ui.button(other, "Autre couleur", false, Hit::CustomBrush);
-        if !PRESETS.contains(&self.brush) {
-            ui.swatch(other.x + other.w + 12.0, 151.0, 26.0, self.brush, true, Hit::CustomBrush);
+        // « Autre couleur » : porte une pastille de la couleur choisie quand elle est active.
+        let other = rc(CX + 10.0 * 30.0 + 6.0, 148.0, 124.0, 32.0);
+        let custom = !PRESETS.contains(&self.brush);
+        ui.button(other, if custom { "    Autre couleur" } else { "Autre couleur" }, false, Hit::CustomBrush);
+        if custom {
+            ui.c.fill(rc(other.x + 9.0, other.y + 9.0, 14.0, 14.0), 7.0, argb(self.brush));
+            ui.c.stroke(rc(other.x + 5.0, other.y + 5.0, 22.0, 22.0), 11.0, t.accent, 1.5);
         }
         let labels: Vec<&str> = KeyFx::ALL.iter().map(|(_, label, _)| *label).collect();
         let selected = KeyFx::ALL.iter().position(|(fx, _, _)| *fx == self.brush_fx);
-        ui.segmented(CX + CW, 164.0, 300.0, &labels, selected, |i| Hit::BrushFx(KeyFx::ALL[i].0));
+        ui.segmented(CX + CW, 164.0, 380.0, &labels, selected, |i| Hit::BrushFx(KeyFx::ALL[i].0));
 
         // Clavier dessiné d'après le vrai : châssis, capuchons, et la couleur de chaque LED qui
         // déborde sous sa touche et éclaire sa légende. Positions en quarts de touche, 10 px le
@@ -1600,7 +1732,11 @@ impl App {
                 .key_styles
                 .iter()
                 .find(|(id, _)| *id == key.id)
-                .map(|(_, style)| style.color)
+                .map(|(_, style)| match style.fx {
+                    // Aperçu figé du dégradé à la position de la touche.
+                    KeyFx::Gradient => self.gradient.at(key.rect.0 as f32 / 78.0, 0.0),
+                    _ => style.color,
+                })
                 .filter(|c| *c != Rgb::BLACK);
             let cap = rc(r.x + 2.5, r.y + 2.5, r.w - 5.0, r.h - 5.0);
             let legend_color = match lit {
@@ -1651,6 +1787,13 @@ impl App {
         ui.button(rc(CX, by, 124.0, 32.0), "Tout remplir", false, Hit::Fill);
         ui.button(rc(CX + 132.0, by, 124.0, 32.0), "Tout éteindre", false, Hit::Clear);
         ui.button(rc(CX + 264.0, by, 124.0, 32.0), "Réappliquer", false, Hit::Reapply);
+        // Couleurs du dégradé, quand c'est l'effet du pinceau.
+        if self.brush_fx == KeyFx::Gradient {
+            for (i, color) in self.gradient.stops.iter().enumerate() {
+                ui.swatch(CX + 404.0 + i as f32 * 30.0, by + 4.0, 24.0, *color, false, Hit::GradStop(i));
+            }
+            ui.button(rc(CX + 500.0, by, 76.0, 32.0), "Défile", self.gradient.scroll, Hit::GradScroll);
+        }
         ui.c.text("Clavier", rc(CX + CW - 220.0, by, 70.0, 32.0), 13.0, false, t.dim, Align::Right);
         ui.segmented(CX + CW, by + 16.0, 140.0, &["Noir", "Blanc"], Some(self.white as usize), |i| Hit::Chassis(i == 1));
 
@@ -1664,8 +1807,19 @@ impl App {
         ui.toggle(right, y + ROW / 2.0, self.guard, Hit::Guard);
 
         let y = y + STEP;
-        let right = ui.setting(y, ICON_EFFECT, "Réaction à la frappe", "Un bref éclair sur chaque touche colorée que vous pressez.");
-        ui.toggle(right, y + ROW / 2.0, self.react, Hit::React);
+        let right = ui.setting(y, ICON_EFFECT, "Réaction à la frappe", "Éclair sur la touche pressée, ou onde qui s'étend autour d'elle.");
+        ui.segmented(right, y + ROW / 2.0, 300.0, &["Désactivée", "Éclair", "Onde"], Some(self.react as usize), |i| Hit::React(i as u8));
+
+        let y = y + STEP;
+        let right = ui.setting(
+            y,
+            ICON_SLEEP,
+            "Atténuation automatique",
+            "Baisse la lumière quand le PC est inactif, l'éteint quand il est verrouillé.",
+        );
+        let delays = [0u32, 1, 5, 15];
+        let selected = delays.iter().position(|d| *d == self.idle);
+        ui.segmented(right, y + ROW / 2.0, 300.0, &["Jamais", "1 min", "5 min", "15 min"], selected, |i| Hit::Idle(delays[i]));
     }
 
     fn draw_settings(&self, ui: &mut Ui) {
@@ -1860,6 +2014,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
             with_app(|a| a.sync_state());
             0
         }
+        win::WM_WTSSESSION_CHANGE => {
+            // Verrouillage ou réouverture de la session : le moteur éteint ou rallume le clavier.
+            let locked = match wparam {
+                win::WTS_SESSION_LOCK => Some(true),
+                win::WTS_SESSION_UNLOCK => Some(false),
+                _ => None,
+            };
+            if let Some(locked) = locked {
+                with_app(|a| a.locked.store(locked, Ordering::Relaxed));
+            }
+            0
+        }
         win::WM_SIZE => {
             win::redraw(hwnd);
             0
@@ -1927,7 +2093,10 @@ fn main() {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let worker_shared = Arc::clone(&shared);
     let hwnd_bits = hwnd as usize;
-    std::thread::spawn(move || worker(rx, worker_shared, hwnd_bits, guard));
+    let locked = Arc::new(AtomicBool::new(false));
+    let worker_locked = Arc::clone(&locked);
+    std::thread::spawn(move || worker(rx, worker_shared, hwnd_bits, guard, worker_locked));
+    win::watch_session(hwnd);
     if guard {
         win::tray_add(hwnd, WM_TRAY, TRAY_TIP);
     }
@@ -1963,7 +2132,10 @@ fn main() {
         brush_fx: KeyFx::Fixed,
         custom_brush: Rgb(255, 255, 255),
         key_styles: store::load_styles(),
-        react: store::flag("react"),
+        react: load_react(),
+        gradient: store::gradient(),
+        idle: load_idle(),
+        locked,
         legends: keys::layout_legends(),
         low_edit: None,
         guard,

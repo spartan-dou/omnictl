@@ -653,6 +653,10 @@ pub fn paint(hwnd: HWND, lw: f32, lh: f32, draw: impl FnOnce(&Canvas)) {
 // ───────────── Arrière-plan : icône de notification, menu, démarrage avec Windows ─────────────
 
 pub const WM_CLOSE: u32 = 0x0010;
+/// Changement d'état de la session (verrouillage, déverrouillage…).
+pub const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+pub const WTS_SESSION_LOCK: usize = 7;
+pub const WTS_SESSION_UNLOCK: usize = 8;
 pub const WM_RBUTTONUP: u32 = 0x0205;
 
 #[repr(C)]
@@ -672,6 +676,43 @@ struct NOTIFYICONDATAW {
     dwInfoFlags: u32,
     guidItem: [u8; 16],
     hBalloonIcon: HANDLE,
+}
+
+#[repr(C)]
+struct LASTINPUTINFO {
+    cbSize: u32,
+    dwTime: u32,
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetLastInputInfo(info: *mut LASTINPUTINFO) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetTickCount() -> u32;
+}
+
+#[link(name = "wtsapi32")]
+extern "system" {
+    fn WTSRegisterSessionNotification(hwnd: HWND, flags: u32) -> i32;
+}
+
+/// Secondes écoulées depuis la dernière action de l'utilisateur (clavier ou souris).
+pub fn idle_seconds() -> u32 {
+    let mut info = LASTINPUTINFO { cbSize: 8, dwTime: 0 };
+    unsafe {
+        if GetLastInputInfo(&mut info) == 0 {
+            return 0;
+        }
+        GetTickCount().wrapping_sub(info.dwTime) / 1000
+    }
+}
+
+/// Demande à recevoir `WM_WTSSESSION_CHANGE` quand la session est verrouillée ou rouverte.
+pub fn watch_session(hwnd: HWND) {
+    unsafe { WTSRegisterSessionNotification(hwnd, 0) }; // cette session seulement
 }
 
 #[link(name = "shell32")]

@@ -5,7 +5,7 @@
 //! (`%APPDATA%\omnictl\keys.txt`), une ligne par touche : `id=rrggbb`, suivie au besoin
 //! du code de son effet (`id=rrggbb,b` pour une respiration ; voir [`KeyFx`]).
 
-use crate::keyfx::{KeyFx, KeyStyle};
+use crate::keyfx::{Gradient, KeyFx, KeyStyle};
 use crate::proto::Rgb;
 use std::path::PathBuf;
 
@@ -64,6 +64,39 @@ pub fn update_colors(changes: &[(u8, Rgb)]) -> std::io::Result<()> {
     save_styles(&all)
 }
 
+/// Petit réglage texte, dans un fichier à son nom. `None` s'il n'a jamais été écrit.
+pub fn value(name: &str) -> Option<String> {
+    std::fs::read_to_string(flag_path(name)?).ok().map(|text| text.trim().to_string())
+}
+
+pub fn set_value(name: &str, text: &str) -> std::io::Result<()> {
+    let path = flag_path(name).ok_or_else(|| std::io::Error::other("dossier de configuration introuvable"))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)
+}
+
+fn parse_gradient(text: &str) -> Option<Gradient> {
+    let (colors, scroll) = text.trim().split_once(';')?;
+    let stops: Option<Vec<Rgb>> = colors.split(',').map(Rgb::parse).collect();
+    Some(Gradient { stops: stops.filter(|s| !s.is_empty())?, scroll: scroll == "1" })
+}
+
+fn format_gradient(gradient: &Gradient) -> String {
+    let colors: Vec<String> = gradient.stops.iter().map(|c| c.hex()[1..].to_string()).collect();
+    format!("{};{}", colors.join(","), gradient.scroll as u8)
+}
+
+/// Dégradé commun des touches réglées sur « Dégradé ».
+pub fn gradient() -> Gradient {
+    value("gradient").and_then(|text| parse_gradient(&text)).unwrap_or_default()
+}
+
+pub fn set_gradient(gradient: &Gradient) -> std::io::Result<()> {
+    set_value("gradient", &format_gradient(gradient))
+}
+
 /// Réglage oui/non, mémorisé par la présence d'un fichier témoin vide.
 fn flag_path(name: &str) -> Option<PathBuf> {
     Some(path()?.with_file_name(name))
@@ -109,6 +142,16 @@ mod tests {
         assert_eq!(format_line(0x08, &wave), "08=0040ff,w\n");
         assert_eq!(parse_line("2d=ff6000"), Some((0x2d, plain)));
         assert_eq!(parse_line("08=0040ff,w"), Some((0x08, wave)));
+    }
+
+    #[test]
+    fn gradient_round_trip() {
+        let g = Gradient { stops: vec![Rgb(255, 0, 0), Rgb(0, 0, 255)], scroll: true };
+        assert_eq!(format_gradient(&g), "ff0000,0000ff;1");
+        assert_eq!(parse_gradient("ff0000,0000ff;1"), Some(g));
+        assert_eq!(parse_gradient("ff0000,pasunecouleur;0"), None);
+        assert_eq!(parse_gradient(";1"), None);
+        assert_eq!(parse_gradient("ff0000"), None);
     }
 
     #[test]
