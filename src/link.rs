@@ -12,7 +12,11 @@ pub const VID_ASUS: u16 = 0x0B05;
 pub const PID_WIRED: u16 = 0x1AAE;
 pub const PID_OMNI: u16 = 0x1ACE;
 const USAGE_PAGE_VENDOR: u16 = 0xFF00;
+const USAGE_PAGE_MOUSE: u16 = 0xFF01;
+/// Report ID du canal clavier du dongle Omni.
 const OMNI_REPORT_ID: u8 = 0x02;
+/// Report ID du canal souris du dongle Omni.
+const OMNI_MOUSE_REPORT_ID: u8 = 0x03;
 
 /// Taille d'une commande ou d'une réponse, report ID exclu.
 pub const PAYLOAD: usize = 64;
@@ -70,6 +74,8 @@ impl Via {
 pub struct Link {
     dev: Device,
     pub via: Via,
+    /// Report ID des rapports de cette collection (0 = aucun).
+    report_id: u8,
     pub verbose: bool,
 }
 
@@ -94,6 +100,7 @@ impl Link {
                 return Ok(Link {
                     dev: Device::open(info)?,
                     via,
+                    report_id: if via == Via::Dongle { OMNI_REPORT_ID } else { 0 },
                     verbose: false,
                 });
             }
@@ -101,11 +108,27 @@ impl Link {
         Err(Error::NotFound)
     }
 
+    /// Ouvre le canal de la souris appairée au dongle Omni (collection FF01, report ID 3).
+    pub fn open_mouse() -> Result<Link> {
+        let all = hid::enumerate(VID_ASUS);
+        let info = all
+            .iter()
+            .find(|d| d.pid == PID_OMNI && d.usage_page == USAGE_PAGE_MOUSE)
+            .ok_or_else(|| Error::Msg("dongle ROG Omni introuvable".into()))?;
+        Ok(Link {
+            dev: Device::open(info)?,
+            via: Via::Dongle,
+            report_id: OMNI_MOUSE_REPORT_ID,
+            verbose: false,
+        })
+    }
+
     /// Nombre d'octets de commande utilisables par paquet sur ce transport.
     pub fn room(&self) -> usize {
-        match self.via {
-            Via::Usb => PAYLOAD,
-            Via::Dongle => PAYLOAD - 1,
+        if self.report_id == 0 {
+            PAYLOAD
+        } else {
+            PAYLOAD - 1
         }
     }
 
@@ -118,9 +141,7 @@ impl Link {
         let mut buf = [0u8; PAYLOAD + 1];
         let room = self.room();
         let len = room + 1;
-        if self.via == Via::Dongle {
-            buf[0] = OMNI_REPORT_ID;
-        }
+        buf[0] = self.report_id;
         if cmd.len() > room {
             return Err(Error::Msg(format!(
                 "commande trop longue pour ce transport ({} > {room} octets)",

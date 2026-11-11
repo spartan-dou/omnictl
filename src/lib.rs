@@ -5,5 +5,6 @@ pub mod json;
 pub mod keys;
 pub mod link;
 pub mod mcp;
+pub mod mouse;
 pub mod proto;
 pub mod store;

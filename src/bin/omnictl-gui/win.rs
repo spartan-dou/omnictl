@@ -263,6 +263,8 @@ pub enum Align {
 pub struct Canvas {
     g: *mut c_void,
     family: *mut c_void,
+    /// Police d'icônes de Windows (Segoe Fluent Icons, ou MDL2 sur Windows 10).
+    icons: *mut c_void,
     scale: f32,
     ox: f32,
     oy: f32,
@@ -271,15 +273,15 @@ pub struct Canvas {
 impl Canvas {
     fn new(hdc: HDC, (scale, ox, oy): (f32, f32, f32)) -> Canvas {
         let mut g = null_mut();
-        let mut family = null_mut();
         unsafe {
             GdipCreateFromHDC(hdc, &mut g);
             GdipSetSmoothingMode(g, 4); // AntiAlias
             // Lissage sans calage sur la grille : avec GDI+, le calage dérègle l'espacement des lettres.
             GdipSetTextRenderingHint(g, 4);
-            GdipCreateFontFamilyFromName(wide("Segoe UI").as_ptr(), null_mut(), &mut family);
         }
-        Canvas { g, family, scale, ox, oy }
+        let family = first_family(&["Segoe UI Variable Text", "Segoe UI"]);
+        let icons = first_family(&["Segoe Fluent Icons", "Segoe MDL2 Assets"]);
+        Canvas { g, family, icons, scale, ox, oy }
     }
 
     pub fn clear(&self, color: u32) {
@@ -381,13 +383,23 @@ impl Canvas {
     }
 
     pub fn text(&self, text: &str, r: Rc, size: f32, bold: bool, color: u32, align: Align) {
+        self.string(self.family, text, r, size, bold, color, align);
+    }
+
+    /// Dessine un glyphe de la police d'icônes, centré dans `r`.
+    pub fn icon(&self, glyph: char, r: Rc, size: f32, color: u32) {
+        let mut buf = [0u8; 4];
+        self.string(self.icons, glyph.encode_utf8(&mut buf), r, size, false, color, Align::Center);
+    }
+
+    fn string(&self, family: *mut c_void, text: &str, r: Rc, size: f32, bold: bool, color: u32, align: Align) {
         let s = self.scale;
         let w = wide(text);
         let layout = RectF { x: r.x * s + self.ox, y: r.y * s + self.oy, w: r.w * s, h: r.h * s };
         let mut font = null_mut();
         let mut format = null_mut();
         unsafe {
-            GdipCreateFont(self.family, size * s, bold as i32, 2, &mut font); // UnitPixel
+            GdipCreateFont(family, size * s, bold as i32, 2, &mut font); // UnitPixel
             GdipCreateStringFormat(0x1000, 0, &mut format); // NoWrap
             GdipSetStringFormatAlign(
                 format,
@@ -414,9 +426,44 @@ impl Drop for Canvas {
     fn drop(&mut self) {
         unsafe {
             GdipDeleteFontFamily(self.family);
+            GdipDeleteFontFamily(self.icons);
             GdipDeleteGraphics(self.g);
         }
     }
+}
+
+/// Première police installée parmi `names`.
+fn first_family(names: &[&str]) -> *mut c_void {
+    for name in names {
+        let mut family = null_mut();
+        let status = unsafe { GdipCreateFontFamilyFromName(wide(name).as_ptr(), null_mut(), &mut family) };
+        if status == 0 && !family.is_null() {
+            return family;
+        }
+    }
+    null_mut()
+}
+
+/// Couleur d'accentuation choisie par l'utilisateur dans Windows (bleu par défaut).
+pub fn accent() -> (u8, u8, u8) {
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let status = unsafe {
+        RegGetValueW(
+            0x8000_0001usize as HANDLE, // HKEY_CURRENT_USER
+            wide("Software\\Microsoft\\Windows\\DWM").as_ptr(),
+            wide("AccentColor").as_ptr(),
+            0x10, // RRF_RT_REG_DWORD
+            null_mut(),
+            &mut value as *mut u32 as *mut c_void,
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return (0x00, 0x5F, 0xB8);
+    }
+    // Stockée en 0xAABBGGRR.
+    (value as u8, (value >> 8) as u8, (value >> 16) as u8)
 }
 
 /// À appeler une fois au démarrage, avant toute création de fenêtre.
