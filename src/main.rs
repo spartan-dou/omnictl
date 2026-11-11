@@ -282,7 +282,7 @@ fn run() -> Result<(), Error> {
                 }
             }
             open(&args)?.set_direct(&leds)?;
-            if let Err(e) = store::save(&store::merge(&leds)) {
+            if let Err(e) = store::update_colors(&leds) {
                 eprintln!("attention : couleurs appliquées mais non mémorisées ({e})");
             }
         }

@@ -11,6 +11,7 @@
 
 mod win;
 
+use omnictl::keyfx::{self, KeyFx, KeyStyle};
 use omnictl::keys;
 use omnictl::link::{Error, Link, Via};
 use omnictl::mouse::{Mouse, MouseLight, MouseMode};
@@ -19,7 +20,7 @@ use omnictl::store;
 use std::cell::RefCell;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use win::{rc, Align, Canvas, Rc, HWND};
 
 /// Taille logique du contenu ; la fenêtre le met à l'échelle.
@@ -40,6 +41,8 @@ const WM_TRAY: u32 = win::WM_APP + 2;
 const REFRESH_MS: u32 = 20_000;
 /// Intervalle des rondes du gardien.
 const GUARD_POLL: Duration = Duration::from_secs(3);
+/// Durée d'une image des effets par touche (environ 30 images par seconde).
+const FRAME: Duration = Duration::from_millis(33);
 const TRAY_TIP: &str = "omnictl — gardien des couleurs du clavier";
 
 const PRESETS: [Rgb; 10] = [
@@ -185,8 +188,13 @@ enum Cmd {
     Refresh,
     Effect(Effect),
     SaveEffect(Effect),
-    Keys(Vec<(u8, Rgb)>),
+    Keys(Vec<(u8, KeyStyle)>),
     ApplyKeys,
+    /// Les couleurs par touche sont-elles ce que le clavier doit afficher ? (Faux dès qu'un
+    /// effet intégré est appliqué.)
+    Live(bool),
+    /// Éclair à la frappe.
+    React(bool),
     Profile(u8),
     Sleep(u8),
     Saving(u8),
@@ -301,7 +309,8 @@ impl Devices {
     /// Exécute une commande. Renvoie le message à afficher, s'il y en a un.
     fn execute(&mut self, cmd: &Cmd) -> Result<Option<&'static str>, Error> {
         Ok(match cmd {
-            Cmd::Refresh | Cmd::Guard(_) => None, // rien à envoyer
+            // Rien à envoyer ici : les couleurs par touche passent par le moteur.
+            Cmd::Refresh | Cmd::Guard(_) | Cmd::Keys(_) | Cmd::ApplyKeys | Cmd::Live(_) | Cmd::React(_) => None,
             Cmd::Effect(e) => {
                 self.kb()?.set_effect(e)?;
                 None // appliqué en direct : pas de message à chaque retouche
@@ -311,20 +320,6 @@ impl Devices {
                 kb.set_effect(e)?;
                 kb.save()?;
                 Some("Effet enregistré dans le clavier.")
-            }
-            Cmd::Keys(leds) => {
-                self.kb()?.set_direct(leds)?;
-                store::save(&store::merge(leds))
-                    .map_err(|e| Error::Msg(format!("Couleurs appliquées mais non mémorisées : {e}")))?;
-                None
-            }
-            Cmd::ApplyKeys => {
-                let leds = store::load();
-                if leds.is_empty() {
-                    return Err(Error::Msg("Aucune couleur touche par touche mémorisée.".into()));
-                }
-                self.kb()?.set_direct(&leds)?;
-                Some("Couleurs touche par touche remises en place.")
             }
             Cmd::Profile(n) => {
                 self.kb()?.set_profile(*n)?;
@@ -402,32 +397,131 @@ impl Devices {
     }
 }
 
+/// Moteur des couleurs touche par touche : calcule l'image courante (effet de chaque touche,
+/// éclair de frappe) et n'envoie au clavier que les LED qui ont changé.
+struct Engine {
+    styles: Vec<(u8, KeyStyle)>,
+    /// Dernière couleur envoyée à chaque LED ; `None` = à (ré)envoyer.
+    last: [Option<Rgb>; 256],
+    /// Éclair de frappe en cours par LED : 1 à l'appui, retombe à 0.
+    boost: [f32; 256],
+    /// Les couleurs par touche sont ce que le clavier doit afficher.
+    live: bool,
+    react: bool,
+    start: Instant,
+    tick: Instant,
+}
+
+impl Engine {
+    fn new(live: bool) -> Engine {
+        let now = Instant::now();
+        Engine {
+            styles: store::load_styles(),
+            last: [None; 256],
+            boost: [0.0; 256],
+            live,
+            react: store::flag("react"),
+            start: now,
+            tick: now,
+        }
+    }
+
+    /// Faut-il recalculer en continu ? (Sinon une seule image suffit.)
+    fn animated(&self) -> bool {
+        self.live && (self.react || self.styles.iter().any(|(_, s)| s.fx != KeyFx::Fixed))
+    }
+
+    /// Tout renvoyer à la prochaine image (clavier réveillé, rebranché, ou effet écrasé).
+    fn reset(&mut self) {
+        self.last = [None; 256];
+    }
+
+    fn merge(&mut self, changes: &[(u8, KeyStyle)]) {
+        for &(id, style) in changes {
+            match self.styles.iter_mut().find(|(i, _)| *i == id) {
+                Some(slot) => slot.1 = style,
+                None => self.styles.push((id, style)),
+            }
+        }
+    }
+
+    fn frame(&mut self, dev: &mut Devices) -> Result<(), Error> {
+        let now = Instant::now();
+        let dt = now.duration_since(self.tick).as_secs_f32();
+        self.tick = now;
+        let t = now.duration_since(self.start).as_secs_f32();
+        if self.react {
+            for b in self.boost.iter_mut() {
+                *b = (*b - dt / keyfx::FLASH_SECONDS).max(0.0);
+            }
+            for id in keys::pressed() {
+                self.boost[id as usize] = 1.0;
+            }
+        }
+        let mut leds = Vec::new();
+        for key in keys::KEYS {
+            // Seules les touches colorées sont pilotées ; les autres gardent ce qu'elles ont.
+            let Some((_, style)) = self.styles.iter().find(|(id, _)| *id == key.id) else { continue };
+            let boost = if self.react { self.boost[key.id as usize] } else { 0.0 };
+            let color = keyfx::flash(style.at(t, key.rect.0 as f32), boost);
+            if self.last[key.id as usize] != Some(color) {
+                leds.push((key.id, color));
+            }
+        }
+        if leds.is_empty() {
+            return Ok(());
+        }
+        dev.kb()?.set_direct(&leds)?;
+        for (id, color) in leds {
+            self.last[id as usize] = Some(color);
+        }
+        Ok(())
+    }
+}
+
 fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard: bool) {
     let mut dev = Devices::default();
-    // Gardien : le clavier était-il joignable au dernier contrôle ? Faux au départ, pour que
-    // les couleurs soient posées dès le premier contact.
-    let mut was_reachable = false;
+    // Avec le gardien, les couleurs par touche sont posées dès le démarrage.
+    let mut engine = Engine::new(guard);
+    // Le clavier répondait-il au dernier contact ? Faux au départ : premier envoi complet.
+    let mut kb_ok = false;
     loop {
-        // Sans gardien, on dort jusqu'à la prochaine commande. Avec, on se réveille toutes
-        // les quelques secondes pour voir si le clavier vient de revenir.
-        let first = if guard {
-            match rx.recv_timeout(GUARD_POLL) {
+        // Trois rythmes : une image toutes les 33 ms quand quelque chose s'anime ; une ronde
+        // toutes les 3 s pour guetter le retour du clavier ; sinon, sommeil jusqu'à la
+        // prochaine commande.
+        let timeout = if engine.animated() && kb_ok {
+            Some(FRAME)
+        } else if guard || engine.live {
+            Some(GUARD_POLL)
+        } else {
+            None
+        };
+        let first = match timeout {
+            Some(delay) => match rx.recv_timeout(delay) {
                 Ok(cmd) => Some(cmd),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
-            }
-        } else {
-            match rx.recv() {
+            },
+            None => match rx.recv() {
                 Ok(cmd) => Some(cmd),
                 Err(_) => return,
-            }
+            },
         };
         let Some(first) = first else {
-            // Simple ronde du gardien : rien à dire à l'interface si rien n'a changé.
+            if engine.animated() && kb_ok {
+                if engine.frame(&mut dev).is_err() {
+                    // Clavier endormi ou débranché : on repasse au rythme des rondes.
+                    dev.kb = None;
+                    kb_ok = false;
+                    engine.reset();
+                }
+                continue;
+            }
             let now = dev.kb_reachable();
-            if now && !was_reachable {
-                let leds = store::load();
-                let restored = !leds.is_empty() && dev.kb().and_then(|k| k.set_direct(&leds)).is_ok();
+            if now && !kb_ok {
+                // Le clavier revient : il a oublié les couleurs par touche.
+                engine.reset();
+                let restored = engine.live && !engine.styles.is_empty() && engine.frame(&mut dev).is_ok();
                 let snap = dev.snapshot();
                 if let Ok(mut s) = shared.lock() {
                     if restored {
@@ -437,7 +531,7 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                 }
                 win::post(hwnd, WM_UPDATE);
             }
-            was_reachable = now;
+            kb_ok = now;
             continue;
         };
         let mut batch = vec![first];
@@ -446,10 +540,36 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
         }
         let mut message: Option<(String, bool)> = None;
         for cmd in coalesce(batch) {
-            if let Cmd::Guard(on) = cmd {
-                guard = on;
-                was_reachable = false; // à l'activation, poser les couleurs à la prochaine ronde
-                continue;
+            match &cmd {
+                Cmd::Guard(on) => {
+                    guard = *on;
+                    if guard {
+                        engine.live = true;
+                        engine.reset();
+                    }
+                }
+                Cmd::Live(on) => {
+                    engine.live = *on;
+                    engine.reset();
+                }
+                Cmd::React(on) => engine.react = *on,
+                Cmd::Keys(changes) => {
+                    engine.merge(changes);
+                    engine.live = true;
+                    if let Err(e) = store::save_styles(&engine.styles) {
+                        message = Some((format!("Couleurs appliquées mais non mémorisées : {e}"), true));
+                    }
+                }
+                Cmd::ApplyKeys => {
+                    engine.live = true;
+                    engine.reset();
+                    message = Some(if engine.styles.is_empty() {
+                        ("Aucune couleur touche par touche mémorisée.".to_string(), true)
+                    } else {
+                        ("Couleurs touche par touche remises en place.".to_string(), false)
+                    });
+                }
+                _ => {}
             }
             match dev.execute(&cmd) {
                 Ok(Some(text)) => message = Some((text.to_string(), false)),
@@ -465,16 +585,26 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
                 }
             }
         }
+        if engine.live {
+            if let Err(e) = engine.frame(&mut dev) {
+                message = Some((e.to_string(), true));
+                dev.kb = None;
+                engine.reset();
+            }
+        }
         let snap = dev.snapshot();
-        if snap.is_err() {
+        kb_ok = snap.is_ok();
+        if !kb_ok {
             dev.kb = None;
-            was_reachable = false; // le gardien agira au retour du clavier
+            engine.reset();
         }
         let mouse = dev.mouse_snapshot();
         if let Ok(mut s) = shared.lock() {
             match (&snap, message) {
-                (_, Some((text, is_error))) => (s.message, s.is_error) = (text, is_error),
-                (Err(e), None) => (s.message, s.is_error) = (e.to_string(), true),
+                // L'état du clavier prime : inutile d'afficher l'échec d'une commande quand
+                // la vraie cause est que le clavier ne répond pas.
+                (Err(e), _) => (s.message, s.is_error) = (e.to_string(), true),
+                (Ok(_), Some((text, is_error))) => (s.message, s.is_error) = (text, is_error),
                 // Tout va bien de nouveau : effacer une ancienne erreur.
                 (Ok(_), None) if s.is_error => (s.message, s.is_error) = (String::new(), false),
                 (Ok(_), None) => {}
@@ -517,6 +647,9 @@ enum Hit {
     SaveEffect,
     Preset(usize),
     CustomBrush,
+    /// Effet posé par le pinceau.
+    BrushFx(KeyFx),
+    React,
     Key(u8),
     Fill,
     Clear,
@@ -770,8 +903,12 @@ struct App {
     /// La souris suit l'éclairage du clavier.
     sync: bool,
     brush: Rgb,
+    /// Effet que le pinceau pose avec sa couleur.
+    brush_fx: KeyFx,
     custom_brush: Rgb,
-    key_colors: Vec<(u8, Rgb)>,
+    key_styles: Vec<(u8, KeyStyle)>,
+    /// Éclair à la frappe sur les touches colorées.
+    react: bool,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -883,6 +1020,7 @@ impl App {
         if self.guard {
             self.set_guard(false);
         }
+        self.send(Cmd::Live(false));
         self.send(Cmd::Effect(self.fx.clone()));
         if self.sync {
             self.mouse_fx = mouse_from_effect(&self.fx);
@@ -917,32 +1055,38 @@ impl App {
         self.send(Cmd::Guard(on));
     }
 
-    fn set_key(&mut self, id: u8, color: Rgb) -> bool {
-        match self.key_colors.iter_mut().find(|(i, _)| *i == id) {
-            Some(slot) if slot.1 == color => false,
+    fn set_key(&mut self, id: u8, style: KeyStyle) -> bool {
+        match self.key_styles.iter_mut().find(|(i, _)| *i == id) {
+            Some(slot) if slot.1 == style => false,
             Some(slot) => {
-                slot.1 = color;
+                slot.1 = style;
                 true
             }
             None => {
-                self.key_colors.push((id, color));
+                self.key_styles.push((id, style));
                 true
             }
         }
     }
 
+    /// Ce que le pinceau pose sur une touche.
+    fn brush_style(&self) -> KeyStyle {
+        KeyStyle { color: self.brush, fx: self.brush_fx }
+    }
+
     fn paint_key(&mut self, id: u8) {
-        if self.set_key(id, self.brush) {
-            self.send(Cmd::Keys(vec![(id, self.brush)]));
+        let style = self.brush_style();
+        if self.set_key(id, style) {
+            self.send(Cmd::Keys(vec![(id, style)]));
         }
     }
 
-    fn paint_all(&mut self, color: Rgb) {
-        let leds: Vec<(u8, Rgb)> = keys::KEYS.iter().map(|k| (k.id, color)).collect();
-        for &(id, c) in &leds {
-            self.set_key(id, c);
+    fn paint_all(&mut self, style: KeyStyle) {
+        let changes: Vec<(u8, KeyStyle)> = keys::KEYS.iter().map(|k| (k.id, style)).collect();
+        for &(id, style) in &changes {
+            self.set_key(id, style);
         }
-        self.send(Cmd::Keys(leds));
+        self.send(Cmd::Keys(changes));
     }
 
     /// Reprend le dernier état publié par le fil de travail.
@@ -1088,6 +1232,7 @@ impl App {
                 if self.guard {
                     self.set_guard(false);
                 }
+                self.send(Cmd::Live(false));
                 self.send(Cmd::SaveEffect(self.fx.clone()));
                 if self.sync {
                     self.send(Cmd::MouseSave(self.mouse_fx));
@@ -1095,8 +1240,14 @@ impl App {
             }
             Hit::Preset(i) => self.brush = PRESETS[i],
             Hit::CustomBrush => self.picker = Some(Picker::new(PickTarget::Brush, self.custom_brush)),
-            Hit::Fill => self.paint_all(self.brush),
-            Hit::Clear => self.paint_all(Rgb::BLACK),
+            Hit::Fill => self.paint_all(self.brush_style()),
+            Hit::Clear => self.paint_all(KeyStyle::fixed(Rgb::BLACK)),
+            Hit::BrushFx(fx) => self.brush_fx = fx,
+            Hit::React => {
+                self.react = !self.react;
+                let _ = store::set_flag("react", self.react);
+                self.send(Cmd::React(self.react));
+            }
             Hit::Reapply => self.send(Cmd::ApplyKeys),
             Hit::Guard => self.set_guard(!self.guard),
             Hit::Chassis(white) => {
@@ -1367,17 +1518,18 @@ impl App {
 
     fn draw_keys(&self, ui: &mut Ui) {
         let t = &self.theme;
-        ui.heading("Pinceau", CX, 124.0);
+        ui.heading("Pinceau : une couleur et un effet par touche", CX, 124.0);
         for (i, color) in PRESETS.iter().enumerate() {
-            ui.swatch(CX + 2.0 + i as f32 * 38.0, 150.0, 28.0, *color, self.brush == *color, Hit::Preset(i));
+            ui.swatch(CX + 2.0 + i as f32 * 34.0, 151.0, 26.0, *color, self.brush == *color, Hit::Preset(i));
         }
-        let other = rc(CX + 10.0 * 38.0 + 10.0, 148.0, 120.0, 32.0);
+        let other = rc(CX + 10.0 * 34.0 + 8.0, 148.0, 112.0, 32.0);
         ui.button(other, "Autre couleur", false, Hit::CustomBrush);
         if !PRESETS.contains(&self.brush) {
-            ui.swatch(other.x + other.w + 14.0, 150.0, 28.0, self.brush, true, Hit::CustomBrush);
+            ui.swatch(other.x + other.w + 12.0, 151.0, 26.0, self.brush, true, Hit::CustomBrush);
         }
-        ui.c.text("Clavier", rc(CX + CW - 220.0, 148.0, 70.0, 32.0), 13.0, false, t.dim, Align::Right);
-        ui.segmented(CX + CW, 164.0, 140.0, &["Noir", "Blanc"], Some(self.white as usize), |i| Hit::Chassis(i == 1));
+        let labels: Vec<&str> = KeyFx::ALL.iter().map(|(_, label, _)| *label).collect();
+        let selected = KeyFx::ALL.iter().position(|(fx, _, _)| *fx == self.brush_fx);
+        ui.segmented(CX + CW, 164.0, 300.0, &labels, selected, |i| Hit::BrushFx(KeyFx::ALL[i].0));
 
         // Clavier dessiné d'après le vrai : châssis, capuchons, et la couleur de chaque LED qui
         // déborde sous sa touche et éclaire sa légende. Positions en quarts de touche, 10 px le
@@ -1411,10 +1563,10 @@ impl App {
             }
             let r = rc(ox + kx as f32 * u + 1.5, oy + ky as f32 * u + 1.5, kw as f32 * u - 3.0, kh as f32 * u - 3.0);
             let lit = self
-                .key_colors
+                .key_styles
                 .iter()
                 .find(|(id, _)| *id == key.id)
-                .map(|(_, c)| *c)
+                .map(|(_, style)| style.color)
                 .filter(|c| *c != Rgb::BLACK);
             let cap = rc(r.x + 2.5, r.y + 2.5, r.w - 5.0, r.h - 5.0);
             let legend_color = match lit {
@@ -1465,7 +1617,8 @@ impl App {
         ui.button(rc(CX, by, 124.0, 32.0), "Tout remplir", false, Hit::Fill);
         ui.button(rc(CX + 132.0, by, 124.0, 32.0), "Tout éteindre", false, Hit::Clear);
         ui.button(rc(CX + 264.0, by, 124.0, 32.0), "Réappliquer", false, Hit::Reapply);
-        ui.c.text("Cliquez ou glissez sur les touches pour les colorer.", rc(CX + 404.0, by, CW - 404.0, 32.0), 12.5, false, t.dim, Align::Left);
+        ui.c.text("Clavier", rc(CX + CW - 220.0, by, 70.0, 32.0), 13.0, false, t.dim, Align::Right);
+        ui.segmented(CX + CW, by + 16.0, 140.0, &["Noir", "Blanc"], Some(self.white as usize), |i| Hit::Chassis(i == 1));
 
         let y = by + 46.0;
         let right = ui.setting(
@@ -1475,6 +1628,10 @@ impl App {
             "omnictl reste en arrière-plan et les renvoie au clavier à chaque réveil.",
         );
         ui.toggle(right, y + ROW / 2.0, self.guard, Hit::Guard);
+
+        let y = y + STEP;
+        let right = ui.setting(y, ICON_EFFECT, "Réaction à la frappe", "Un bref éclair sur chaque touche colorée que vous pressez.");
+        ui.toggle(right, y + ROW / 2.0, self.react, Hit::React);
     }
 
     fn draw_settings(&self, ui: &mut Ui) {
@@ -1769,8 +1926,10 @@ fn main() {
         mouse_fx: MouseLight { mode: MouseMode::Static, color: PRESETS[0], level: 4 },
         sync: store::flag("sync"),
         brush: PRESETS[0],
+        brush_fx: KeyFx::Fixed,
         custom_brush: Rgb(255, 255, 255),
-        key_colors: store::load(),
+        key_styles: store::load_styles(),
+        react: store::flag("react"),
         legends: keys::layout_legends(),
         low_edit: None,
         guard,

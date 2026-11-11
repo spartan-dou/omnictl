@@ -488,13 +488,21 @@ impl Keyboard {
     /// enregistré lorsqu'il est éteint, se met en veille ou reçoit un effet.
     pub fn set_direct(&mut self, leds: &[(u8, Rgb)]) -> Result<()> {
         let per_packet = (self.link.room() - 4) / 4;
-        for chunk in leds.chunks(per_packet) {
+        let mut chunks = leds.chunks(per_packet).peekable();
+        while let Some(chunk) = chunks.next() {
             let mut p = vec![0xC0, 0x81, chunk.len() as u8, 0x00];
             for (id, c) in chunk {
                 p.extend_from_slice(&[*id, c.0, c.1, c.2]);
             }
-            // Accusé mesuré : `C0 82 n` (le second octet n'est pas repris tel quel).
-            self.link.request_matching(&p, 1, Duration::from_millis(1000))?;
+            if chunks.peek().is_some() {
+                // Paquets intermédiaires envoyés d'affilée, comme le fait le pilote ASUS :
+                // attendre chaque accusé diviserait par trois la cadence des animations.
+                self.link.write(&p)?;
+            } else {
+                // Seul le dernier est attendu : son accusé (`C0 82 n`, le second octet
+                // n'est pas repris tel quel) ou un refus dit si le clavier est toujours là.
+                self.link.request_matching(&p, 1, Duration::from_millis(1000))?;
+            }
         }
         Ok(())
     }

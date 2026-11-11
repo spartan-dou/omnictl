@@ -228,3 +228,72 @@ pub fn resolve(name: &str, legends: &[(u8, char)]) -> Option<Vec<u8>> {
     }
     KEYS.iter().find(|k| k.name == n).map(|k| vec![k.id])
 }
+
+/// Code de touche virtuelle Windows des touches sans scancode dans la table.
+#[cfg(windows)]
+fn virtual_key(name: &str) -> Option<u32> {
+    Some(match name {
+        "esc" => 0x1B,
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "capslock" => 0x14,
+        "space1" | "space2" | "space3" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "insert" => 0x2D,
+        "delete" => 0x2E,
+        "lwin" => 0x5B,
+        "nummultiply" => 0x6A,
+        "numplus" => 0x6B,
+        "numminus" => 0x6D,
+        "numperiod" => 0x6E,
+        "numdivide" => 0x6F,
+        "numlock" => 0x90,
+        "lshift" => 0xA0,
+        "rshift" => 0xA1,
+        "lctrl" => 0xA2,
+        "rctrl" => 0xA3,
+        "lalt" => 0xA4,
+        "ralt" => 0xA5,
+        _ => {
+            let digit = name.strip_prefix("num")?.parse::<u32>().ok()?;
+            0x60 + digit
+        }
+    })
+}
+
+/// Identifiants des LED dont la touche est enfoncée en ce moment.
+///
+/// Sert à l'éclair de frappe. L'état est lu auprès de Windows à l'instant de l'appel ; rien
+/// n'est enregistré ni transmis, et seule la position de la touche est utilisée.
+#[cfg(windows)]
+pub fn pressed() -> Vec<u8> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+        fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+    }
+    KEYS.iter()
+        .filter(|key| {
+            let vk = if key.scan != 0 {
+                unsafe { MapVirtualKeyW(key.scan as u32, 1) } // scancode → touche virtuelle
+            } else {
+                virtual_key(key.name).unwrap_or(0)
+            };
+            // Bit de poids fort : enfoncée maintenant. Bit 0 : enfoncée depuis le dernier appel
+            // (rattrape une frappe plus brève que l'intervalle entre deux images).
+            vk != 0 && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8001 != 0
+        })
+        .map(|key| key.id)
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn pressed() -> Vec<u8> {
+    Vec::new()
+}

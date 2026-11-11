@@ -2,6 +2,7 @@
 
 pub mod hid;
 pub mod json;
+pub mod keyfx;
 pub mod keys;
 pub mod link;
 pub mod mcp;

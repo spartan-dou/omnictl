@@ -316,7 +316,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, Error> {
             }
             open()?.set_direct(&leds)?;
             let count = leds.len();
-            match store::save(&store::merge(&leds)) {
+            match store::update_colors(&leds) {
                 Ok(()) => Ok(format!("{count} LED colorées et mémorisées")),
                 Err(e) => Ok(format!("{count} LED colorées, mais non mémorisées sur le disque : {e}")),
             }
