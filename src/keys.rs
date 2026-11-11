@@ -24,6 +24,9 @@ const fn k(id: u8, name: &'static str, scan: u8, x: u8, y: u8, w: u8, h: u8) -> 
 }
 
 /// Toutes les LED adressables. Les positions sont en quarts d'unité (4 = une touche).
+/// Disposition relevée sur le clavier réel : le pavé numérique est séparé du bloc principal
+/// par une demi-touche (colonne des voyants), les flèches sont décalées d'un quart de touche,
+/// et le bouton ROG, plus large, précède la molette en haut à droite.
 pub static KEYS: &[Key] = &[
     // Rangée des fonctions
     k(0x00, "esc", 0x01, 0, 0, 4, 4),
@@ -43,7 +46,7 @@ pub static KEYS: &[Key] = &[
     k(0x70, "delete", 0, 56, 0, 4, 4),
     k(0x78, "pageup", 0, 60, 0, 4, 4),
     k(0x80, "pagedown", 0, 64, 0, 4, 4),
-    k(0x88, "logo", 0, 72, 0, 4, 4),
+    k(0x88, "logo", 0, 69, 0, 6, 4),
     // Rangée des chiffres
     k(0x01, "grave", 0x29, 0, 4, 4, 4),
     k(0x09, "1", 0x02, 4, 4, 4, 4),
@@ -59,10 +62,10 @@ pub static KEYS: &[Key] = &[
     k(0x59, "minus", 0x0C, 44, 4, 4, 4),
     k(0x61, "equal", 0x0D, 48, 4, 4, 4),
     k(0x69, "backspace", 0, 52, 4, 8, 4),
-    k(0x79, "numlock", 0, 60, 4, 4, 4),
-    k(0x81, "numdivide", 0, 64, 4, 4, 4),
-    k(0x89, "nummultiply", 0, 68, 4, 4, 4),
-    k(0x91, "numminus", 0, 72, 4, 4, 4),
+    k(0x79, "numlock", 0, 62, 4, 4, 4),
+    k(0x81, "numdivide", 0, 66, 4, 4, 4),
+    k(0x89, "nummultiply", 0, 70, 4, 4, 4),
+    k(0x91, "numminus", 0, 74, 4, 4, 4),
     // Rangée du haut des lettres
     k(0x02, "tab", 0, 0, 8, 6, 4),
     k(0x0A, "q", 0x10, 6, 8, 4, 4),
@@ -80,10 +83,10 @@ pub static KEYS: &[Key] = &[
     // 0x6A : antislash des claviers ANSI ; absent en ISO, où Entrée (0x6B) occupe deux rangées.
     k(0x6A, "backslash", 0, 54, 8, 0, 0),
     k(0x6B, "enter", 0, 55, 8, 5, 8),
-    k(0x7A, "num7", 0, 60, 8, 4, 4),
-    k(0x82, "num8", 0, 64, 8, 4, 4),
-    k(0x8A, "num9", 0, 68, 8, 4, 4),
-    k(0x92, "numplus", 0, 72, 8, 4, 8),
+    k(0x7A, "num7", 0, 62, 8, 4, 4),
+    k(0x82, "num8", 0, 66, 8, 4, 4),
+    k(0x8A, "num9", 0, 70, 8, 4, 4),
+    k(0x92, "numplus", 0, 74, 8, 4, 8),
     // Rangée de repos
     k(0x03, "capslock", 0, 0, 12, 7, 4),
     k(0x0B, "a", 0x1E, 7, 12, 4, 4),
@@ -98,9 +101,9 @@ pub static KEYS: &[Key] = &[
     k(0x53, "semicolon", 0x27, 43, 12, 4, 4),
     k(0x5B, "quote", 0x28, 47, 12, 4, 4),
     k(0x63, "hash", 0x2B, 51, 12, 4, 4),
-    k(0x7B, "num4", 0, 60, 12, 4, 4),
-    k(0x83, "num5", 0, 64, 12, 4, 4),
-    k(0x8B, "num6", 0, 68, 12, 4, 4),
+    k(0x7B, "num4", 0, 62, 12, 4, 4),
+    k(0x83, "num5", 0, 66, 12, 4, 4),
+    k(0x8B, "num6", 0, 70, 12, 4, 4),
     // Rangée du bas des lettres
     k(0x04, "lshift", 0, 0, 16, 5, 4),
     k(0x0C, "iso", 0x56, 5, 16, 4, 4),
@@ -115,11 +118,11 @@ pub static KEYS: &[Key] = &[
     k(0x54, "period", 0x34, 41, 16, 4, 4),
     k(0x5C, "slash", 0x35, 45, 16, 4, 4),
     k(0x64, "rshift", 0, 49, 16, 7, 4),
-    k(0x74, "up", 0, 56, 16, 4, 4),
-    k(0x7C, "num1", 0, 60, 16, 4, 4),
-    k(0x84, "num2", 0, 64, 16, 4, 4),
-    k(0x8C, "num3", 0, 68, 16, 4, 4),
-    k(0x94, "numenter", 0, 72, 16, 4, 8),
+    k(0x74, "up", 0, 57, 16, 4, 4),
+    k(0x7C, "num1", 0, 62, 16, 4, 4),
+    k(0x84, "num2", 0, 66, 16, 4, 4),
+    k(0x8C, "num3", 0, 70, 16, 4, 4),
+    k(0x94, "numenter", 0, 74, 16, 4, 8),
     // Rangée du bas ; la barre d'espace porte trois LED.
     k(0x05, "lctrl", 0, 0, 20, 5, 4),
     k(0x0D, "lwin", 0, 5, 20, 5, 4),
@@ -130,11 +133,11 @@ pub static KEYS: &[Key] = &[
     k(0x55, "ralt", 0, 40, 20, 4, 4),
     k(0x5D, "fn", 0, 44, 20, 4, 4),
     k(0x65, "rctrl", 0, 48, 20, 4, 4),
-    k(0x6D, "left", 0, 52, 20, 4, 4),
-    k(0x75, "down", 0, 56, 20, 4, 4),
-    k(0x7D, "right", 0, 60, 20, 4, 4),
-    k(0x85, "num0", 0, 64, 20, 4, 4),
-    k(0x8D, "numperiod", 0, 68, 20, 4, 4),
+    k(0x6D, "left", 0, 53, 20, 4, 4),
+    k(0x75, "down", 0, 57, 20, 4, 4),
+    k(0x7D, "right", 0, 61, 20, 4, 4),
+    k(0x85, "num0", 0, 66, 20, 4, 4),
+    k(0x8D, "numperiod", 0, 70, 20, 4, 4),
 ];
 
 /// Groupes nommés, utilisables partout où un nom de touche est attendu.

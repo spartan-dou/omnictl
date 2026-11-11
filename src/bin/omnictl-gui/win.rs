@@ -1,5 +1,5 @@
 //! Liaisons Windows minimales pour l'interface : fenêtre (user32), tampon hors écran (gdi32),
-//! dessin lissé (GDI+), sélecteur de couleur (comdlg32), thème (dwmapi, registre).
+//! dessin lissé (GDI+), thème (dwmapi, registre).
 //!
 //! Tout est dessiné par le programme : pas de contrôles Windows, donc un rendu identique en
 //! thème clair et sombre, et aucune bibliothèque graphique à embarquer.
@@ -78,19 +78,6 @@ struct PAINTSTRUCT {
 }
 
 #[repr(C)]
-struct CHOOSECOLORW {
-    lStructSize: u32,
-    hwndOwner: HWND,
-    hInstance: HWND,
-    rgbResult: u32,
-    lpCustColors: *mut u32,
-    Flags: u32,
-    lCustData: isize,
-    lpfnHook: *const c_void,
-    lpTemplateName: *const u16,
-}
-
-#[repr(C)]
 struct GdiplusStartupInput {
     GdiplusVersion: u32,
     DebugEventCallback: *const c_void,
@@ -161,11 +148,6 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> HANDLE;
 }
 
-#[link(name = "comdlg32")]
-extern "system" {
-    fn ChooseColorW(cc: *mut CHOOSECOLORW) -> i32;
-}
-
 #[link(name = "dwmapi")]
 extern "system" {
     fn DwmSetWindowAttribute(hwnd: HWND, attribute: u32, value: *const c_void, size: u32) -> i32;
@@ -202,6 +184,14 @@ extern "system" {
     fn GdipClosePathFigure(path: *mut c_void) -> i32;
     fn GdipFillPath(graphics: *mut c_void, brush: *mut c_void, path: *mut c_void) -> i32;
     fn GdipDrawPath(graphics: *mut c_void, pen: *mut c_void, path: *mut c_void) -> i32;
+    fn GdipCreateLineBrushFromRect(
+        rect: *const RectF,
+        from: u32,
+        to: u32,
+        mode: i32,
+        wrap: i32,
+        brush: *mut *mut c_void,
+    ) -> i32;
     fn GdipFillRectangle(graphics: *mut c_void, brush: *mut c_void, x: f32, y: f32, w: f32, h: f32) -> i32;
     fn GdipCreateFontFamilyFromName(name: *const u16, collection: *mut c_void, family: *mut *mut c_void) -> i32;
     fn GdipDeleteFontFamily(family: *mut c_void) -> i32;
@@ -340,6 +330,19 @@ impl Canvas {
         self.with_brush(color, |brush| unsafe {
             GdipFillRectangle(self.g, brush, r.x * s, r.y * s, r.w * s, r.h * s);
         });
+    }
+
+    /// Dégradé linéaire entre deux couleurs, horizontal ou vertical.
+    pub fn gradient(&self, r: Rc, from: u32, to: u32, vertical: bool) {
+        let s = self.scale;
+        let rect = RectF { x: r.x * s, y: r.y * s, w: r.w * s, h: r.h * s };
+        let mut brush = null_mut();
+        unsafe {
+            // Mode « mosaïque en miroir » : pas de liseré d'une autre couleur sur les bords.
+            GdipCreateLineBrushFromRect(&rect, from, to, vertical as i32, 3, &mut brush);
+            GdipFillRectangle(self.g, brush, rect.x, rect.y, rect.w, rect.h);
+            GdipDeleteBrush(brush);
+        }
     }
 
     /// Largeur d'un texte en pixels logiques.
@@ -577,25 +580,4 @@ pub fn paint(hwnd: HWND, draw: impl FnOnce(&Canvas)) {
         DeleteDC(mem);
         EndPaint(hwnd, &ps);
     }
-}
-
-/// Ouvre le sélecteur de couleur de Windows. `None` si l'utilisateur annule.
-/// Boucle modale : ne pas appeler pendant qu'un emprunt de l'état de l'application est en cours.
-pub fn choose_color(hwnd: HWND, initial: (u8, u8, u8), custom: &mut [u32; 16]) -> Option<(u8, u8, u8)> {
-    let mut cc = CHOOSECOLORW {
-        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: hwnd,
-        hInstance: null_mut(),
-        rgbResult: initial.0 as u32 | (initial.1 as u32) << 8 | (initial.2 as u32) << 16,
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: 0x1 | 0x2 | 0x100, // RGBINIT | FULLOPEN | ANYCOLOR
-        lCustData: 0,
-        lpfnHook: null(),
-        lpTemplateName: null(),
-    };
-    if unsafe { ChooseColorW(&mut cc) } == 0 {
-        return None;
-    }
-    let c = cc.rgbResult;
-    Some((c as u8, (c >> 8) as u8, (c >> 16) as u8))
 }

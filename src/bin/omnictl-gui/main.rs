@@ -49,7 +49,6 @@ struct Theme {
     accent: u32,
     on_accent: u32,
     danger: u32,
-    key: u32,
 }
 
 const DARK: Theme = Theme {
@@ -62,7 +61,6 @@ const DARK: Theme = Theme {
     accent: 0xFFFF3355,
     on_accent: 0xFFFFFFFF,
     danger: 0xFFFF6B6B,
-    key: 0xFF262A31,
 };
 
 const LIGHT: Theme = Theme {
@@ -75,7 +73,6 @@ const LIGHT: Theme = Theme {
     accent: 0xFFE0284A,
     on_accent: 0xFFFFFFFF,
     danger: 0xFFC62828,
-    key: 0xFFE4E7EC,
 };
 
 fn argb(c: Rgb) -> u32 {
@@ -313,12 +310,79 @@ enum Hit {
     Saving(u8),
     Low,
     Wdl,
+    PickSv,
+    PickHue,
+    PickPreset(usize),
+    PickOk,
+    PickCancel,
 }
 
-/// Action qui ouvre une boîte de dialogue modale, donc à mener hors de tout emprunt de l'état.
-enum Deferred {
-    PickEffectColor(usize, Rgb),
-    PickBrush(Rgb),
+/// Ce que le sélecteur de couleur est en train de modifier.
+#[derive(Clone, Copy)]
+enum PickTarget {
+    EffectColor(usize),
+    Brush,
+}
+
+/// Sélecteur de couleur intégré (teinte / saturation / luminosité), affiché par-dessus la page.
+struct Picker {
+    target: PickTarget,
+    /// Couleur à rétablir si l'utilisateur annule.
+    original: Rgb,
+    /// Teinte en degrés (0 à 360), saturation et valeur entre 0 et 1.
+    h: f32,
+    s: f32,
+    v: f32,
+}
+
+impl Picker {
+    fn new(target: PickTarget, color: Rgb) -> Picker {
+        let (h, s, v) = rgb_to_hsv(color);
+        Picker { target, original: color, h, s, v }
+    }
+
+    fn color(&self) -> Rgb {
+        hsv_to_rgb(self.h, self.s, self.v)
+    }
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Rgb {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(to(r), to(g), to(b))
+}
+
+fn rgb_to_hsv(c: Rgb) -> (f32, f32, f32) {
+    let (r, g, b) = (c.0 as f32 / 255.0, c.1 as f32 / 255.0, c.2 as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let d = max - r.min(g).min(b);
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, if max == 0.0 { 0.0 } else { d / max }, max)
+}
+
+/// Mélange linéaire de deux couleurs ; `t` = part de `b`.
+fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
 struct Ui<'a> {
@@ -444,8 +508,7 @@ struct App {
     hits: Vec<(Rc, Hit)>,
     hover: Option<Hit>,
     drag: Option<Hit>,
-    /// Couleurs personnalisées du sélecteur de couleur de Windows.
-    custom: [u32; 16],
+    picker: Option<Picker>,
 }
 
 fn short_label(mode: Mode) -> &'static str {
@@ -603,6 +666,20 @@ impl App {
         Some(((x - r.x - 9.0) / (r.w - 18.0)).clamp(0.0, 1.0))
     }
 
+    /// Répercute en direct la couleur du sélecteur sur ce qu'il modifie.
+    fn apply_pick(&mut self) {
+        let Some(p) = &self.picker else { return };
+        let color = p.color();
+        if let PickTarget::EffectColor(i) = p.target {
+            if let Some(slot) = self.fx.colors.get_mut(i) {
+                if *slot != color {
+                    *slot = color;
+                    self.push_effect();
+                }
+            }
+        }
+    }
+
     fn drag_to(&mut self, hit: Hit, x: f32, y: f32) {
         match hit {
             Hit::Brightness => {
@@ -624,20 +701,32 @@ impl App {
                     self.paint_key(id);
                 }
             }
+            Hit::PickSv | Hit::PickHue => {
+                let Some(r) = self.rect_of(hit) else { return };
+                let fx = ((x - r.x) / r.w).clamp(0.0, 1.0);
+                let fy = ((y - r.y) / r.h).clamp(0.0, 1.0);
+                if let Some(p) = &mut self.picker {
+                    if hit == Hit::PickHue {
+                        p.h = fx * 359.9;
+                    } else {
+                        (p.s, p.v) = (fx, 1.0 - fy);
+                    }
+                }
+                self.apply_pick();
+            }
             _ => {}
         }
     }
 
-    fn mouse_down(&mut self, x: f32, y: f32) -> Option<Deferred> {
-        let (_, hit) = self.hit_at(x, y)?;
-        let mut deferred = None;
+    fn mouse_down(&mut self, x: f32, y: f32) {
+        let Some((_, hit)) = self.hit_at(x, y) else { return };
         match hit {
             Hit::Tab(tab) => self.tab = tab,
             Hit::Mode(mode) => {
                 self.set_mode(mode);
                 self.push_effect();
             }
-            Hit::Color(i) => deferred = Some(Deferred::PickEffectColor(i, self.fx.colors[i])),
+            Hit::Color(i) => self.picker = Some(Picker::new(PickTarget::EffectColor(i), self.fx.colors[i])),
             Hit::AddColor => {
                 let max = self.fx.mode.info().colors.1;
                 if self.fx.mode == Mode::Quicksand {
@@ -669,7 +758,7 @@ impl App {
             }
             Hit::SaveEffect => self.send(Cmd::SaveEffect(self.fx.clone())),
             Hit::Preset(i) => self.brush = PRESETS[i],
-            Hit::CustomBrush => deferred = Some(Deferred::PickBrush(self.custom_brush)),
+            Hit::CustomBrush => self.picker = Some(Picker::new(PickTarget::Brush, self.custom_brush)),
             Hit::Fill => self.paint_all(self.brush),
             Hit::Clear => self.paint_all(Rgb::BLACK),
             Hit::Reapply => self.send(Cmd::ApplyKeys),
@@ -681,14 +770,35 @@ impl App {
                     self.send(Cmd::Wdl(!s.wdl));
                 }
             }
-            Hit::Brightness | Hit::Low | Hit::Key(_) => {
+            Hit::PickPreset(i) => {
+                if let Some(p) = &mut self.picker {
+                    (p.h, p.s, p.v) = rgb_to_hsv(PRESETS[i]);
+                }
+                self.apply_pick();
+            }
+            Hit::PickOk => {
+                if let Some(p) = self.picker.take() {
+                    if matches!(p.target, PickTarget::Brush) {
+                        self.custom_brush = p.color();
+                        self.brush = p.color();
+                    }
+                }
+            }
+            Hit::PickCancel => {
+                // Rétablir la couleur d'origine, déjà modifiée en direct pour un effet.
+                if let Some(p) = &mut self.picker {
+                    (p.h, p.s, p.v) = rgb_to_hsv(p.original);
+                }
+                self.apply_pick();
+                self.picker = None;
+            }
+            Hit::Brightness | Hit::Low | Hit::Key(_) | Hit::PickSv | Hit::PickHue => {
                 self.drag = Some(hit);
                 win::capture(self.hwnd);
                 self.drag_to(hit, x, y);
             }
         }
         win::redraw(self.hwnd);
-        deferred
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
@@ -729,7 +839,57 @@ impl App {
         }
         let color = if self.is_error { self.theme.danger } else { self.theme.dim };
         c.text(&self.message, rc(M, H - 40.0, W - 2.0 * M, 24.0), 12.5, false, color, Align::Left);
+        if self.picker.is_some() {
+            ui.hits.clear(); // la page derrière le sélecteur n'est plus cliquable
+            self.draw_picker(&mut ui);
+        }
         self.hits = ui.hits;
+    }
+
+    fn draw_picker(&self, ui: &mut Ui) {
+        let Some(p) = &self.picker else { return };
+        let t = self.theme;
+        ui.c.bar(rc(0.0, 0.0, W, H), 0x8C000000);
+        let (px, py) = ((W - 320.0) / 2.0, (H - 404.0) / 2.0);
+        let panel = rc(px, py, 320.0, 404.0);
+        ui.c.fill(panel, 14.0, t.surface);
+        ui.c.stroke(panel, 14.0, t.border, 1.0);
+        ui.c.text("Choisir une couleur", rc(px + 20.0, py + 14.0, 280.0, 28.0), 15.0, true, t.text, Align::Left);
+
+        // Carré saturation (horizontale) / luminosité (verticale) pour la teinte courante.
+        let sv = rc(px + 20.0, py + 52.0, 280.0, 170.0);
+        ui.c.gradient(sv, 0xFFFFFFFF, argb(hsv_to_rgb(p.h, 1.0, 1.0)), false);
+        ui.c.gradient(sv, 0x00000000, 0xFF000000, true);
+        let (cx, cy) = (sv.x + p.s * sv.w, sv.y + (1.0 - p.v) * sv.h);
+        ui.c.stroke(rc(cx - 7.0, cy - 7.0, 14.0, 14.0), 7.0, 0xFF000000, 3.0);
+        ui.c.stroke(rc(cx - 7.0, cy - 7.0, 14.0, 14.0), 7.0, 0xFFFFFFFF, 1.5);
+        ui.hit(sv, Hit::PickSv);
+
+        // Bande des teintes : six dégradés bout à bout.
+        let hue = rc(px + 20.0, py + 236.0, 280.0, 18.0);
+        let seg = hue.w / 6.0;
+        for i in 0..6 {
+            let from = argb(hsv_to_rgb(i as f32 * 60.0, 1.0, 1.0));
+            let to = argb(hsv_to_rgb((i + 1) as f32 * 60.0, 1.0, 1.0));
+            ui.c.gradient(rc(hue.x + i as f32 * seg, hue.y, seg + 0.5, hue.h), from, to, false);
+        }
+        let hx = hue.x + p.h / 360.0 * hue.w;
+        ui.c.fill(rc(hx - 4.0, hue.y - 3.0, 8.0, hue.h + 6.0), 4.0, 0xFFFFFFFF);
+        ui.c.stroke(rc(hx - 4.0, hue.y - 3.0, 8.0, hue.h + 6.0), 4.0, 0xFF000000, 1.0);
+        ui.hit(rc(hue.x, hue.y - 6.0, hue.w, hue.h + 12.0), Hit::PickHue);
+
+        for (i, color) in PRESETS.iter().enumerate() {
+            ui.swatch(px + 20.0 + i as f32 * 28.6, py + 272.0, 22.0, *color, false, Hit::PickPreset(i));
+        }
+
+        let color = p.color();
+        let preview = rc(px + 20.0, py + 312.0, 46.0, 30.0);
+        ui.c.fill(preview, 7.0, argb(color));
+        ui.c.stroke(preview, 7.0, t.border, 1.0);
+        ui.c.text(&color.hex().to_uppercase(), rc(px + 78.0, py + 312.0, 120.0, 30.0), 14.0, true, t.text, Align::Left);
+
+        ui.chip(rc(px + 20.0, py + 354.0, 132.0, 36.0), "Annuler", false, Hit::PickCancel);
+        ui.primary(rc(px + 168.0, py + 354.0, 132.0, 36.0), "Valider", Hit::PickOk);
     }
 
     fn draw_header(&self, ui: &mut Ui) {
@@ -855,20 +1015,52 @@ impl App {
             ui.swatch(other.x + other.w + 14.0, y0 + 26.0, 30.0, self.brush, true, Hit::CustomBrush);
         }
 
-        // Clavier : positions en quarts de touche, 10,5 px le quart.
-        let (ox, oy, u) = (M + 3.0, y0 + 84.0, 10.5);
+        // Clavier dessiné d'après le vrai : châssis sombre, capuchons noirs, et la couleur de
+        // chaque LED qui déborde sous sa touche et éclaire sa légende. Positions en quarts de
+        // touche, 10 px le quart.
+        let u = 10.0;
+        let chassis = rc(M, y0 + 76.0, 78.0 * u + 24.0, 24.0 * u + 24.0);
+        ui.c.fill(chassis, 16.0, 0xFF0B0C0F);
+        ui.c.stroke(chassis, 16.0, 0xFF2B2E35, 1.0);
+        let (ox, oy) = (chassis.x + 12.0, chassis.y + 12.0);
+        // Colonne de voyants entre le bloc principal et le pavé numérique.
+        for i in 0..5 {
+            ui.c.fill(rc(ox + 60.6 * u, oy + (9.6 + i as f32 * 1.5) * u, 0.8 * u, 0.8 * u), 0.4 * u, 0xFF30343C);
+        }
+        // Molette, en haut à droite (décor : elle n'a pas de LED).
+        let knob = rc(ox + 75.4 * u, oy + 0.3 * u, 2.5 * u, 3.4 * u);
+        ui.c.fill(knob, 5.0, 0xFF1D2025);
+        ui.c.stroke(knob, 5.0, 0xFF353941, 1.0);
+        for i in 0..4 {
+            ui.c.bar(rc(knob.x + 5.0 + i as f32 * 5.0, knob.y + 5.0, 1.0, knob.h - 10.0), 0xFF3F444D);
+        }
+
         for key in keys::KEYS {
             let (kx, ky, kw, kh) = key.rect;
             if kw == 0 {
                 continue; // touche absente de la version ISO
             }
             let r = rc(ox + kx as f32 * u + 1.5, oy + ky as f32 * u + 1.5, kw as f32 * u - 3.0, kh as f32 * u - 3.0);
-            let color = self.key_colors.iter().find(|(id, _)| *id == key.id).map(|(_, c)| *c);
-            ui.c.fill(r, 5.0, color.map_or(t.key, argb));
+            let lit = self
+                .key_colors
+                .iter()
+                .find(|(id, _)| *id == key.id)
+                .map(|(_, c)| *c)
+                .filter(|c| *c != Rgb::BLACK);
+            let cap = rc(r.x + 2.5, r.y + 2.5, r.w - 5.0, r.h - 5.0);
+            let legend_color = match lit {
+                Some(c) => {
+                    ui.c.fill(r, 6.0, argb(c));
+                    ui.c.fill(cap, 4.0, argb(mix(Rgb(20, 22, 26), c, 0.28)));
+                    argb(mix(c, Rgb(255, 255, 255), 0.45))
+                }
+                None => {
+                    ui.c.fill(r, 6.0, 0xFF1C1E23);
+                    0xFF5C6370
+                }
+            };
             if ui.hover == Some(Hit::Key(key.id)) {
-                ui.c.stroke(r, 5.0, t.text, 1.5);
-            } else {
-                ui.c.stroke(r, 5.0, t.border, 1.0);
+                ui.c.stroke(r, 6.0, 0xFFFFFFFF, 1.5);
             }
             let legend = self
                 .legends
@@ -884,17 +1076,11 @@ impl App {
                     l.to_string()
                 }
             });
-            // Texte lisible sur n'importe quelle couleur de touche.
-            let fg = match color {
-                Some(Rgb(r, g, b)) if 299 * r as u32 + 587 * g as u32 + 114 * b as u32 > 140_000 => 0xFF101216,
-                Some(_) => 0xFFFFFFFF,
-                None => t.dim,
-            };
-            ui.c.text(&text, r, 10.5, false, fg, Align::Center);
+            ui.c.text(&text, r, 10.5, true, legend_color, Align::Center);
             ui.hit(r, Hit::Key(key.id));
         }
 
-        let by = oy + 252.0 + 18.0;
+        let by = chassis.y + chassis.h + 16.0;
         ui.chip(rc(M, by, 132.0, 36.0), "Tout remplir", false, Hit::Fill);
         ui.chip(rc(M + 144.0, by, 132.0, 36.0), "Tout éteindre", false, Hit::Clear);
         ui.chip(rc(M + 288.0, by, 132.0, 36.0), "Réappliquer", false, Hit::Reapply);
@@ -974,37 +1160,9 @@ thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
-/// Accès à l'état. `None` si l'application n'est pas encore créée ou est déjà empruntée
-/// (message reçu pendant une boîte de dialogue modale).
+/// Accès à l'état. `None` si l'application n'est pas encore créée ou est déjà empruntée.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut app| app.as_mut().map(f)))
-}
-
-fn run_deferred(hwnd: HWND, deferred: Deferred) {
-    let Some(mut custom) = with_app(|a| a.custom) else { return };
-    let initial = match &deferred {
-        Deferred::PickEffectColor(_, c) | Deferred::PickBrush(c) => (c.0, c.1, c.2),
-    };
-    // Aucun emprunt de l'état ici : le sélecteur fait tourner sa propre boucle de messages.
-    let picked = win::choose_color(hwnd, initial, &mut custom);
-    with_app(|a| {
-        a.custom = custom;
-        let Some((r, g, b)) = picked else { return };
-        let color = Rgb(r, g, b);
-        match deferred {
-            Deferred::PickEffectColor(i, _) => {
-                if let Some(slot) = a.fx.colors.get_mut(i) {
-                    *slot = color;
-                    a.push_effect();
-                }
-            }
-            Deferred::PickBrush(_) => {
-                a.custom_brush = color;
-                a.brush = color;
-            }
-        }
-        win::redraw(a.hwnd);
-    });
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
@@ -1019,9 +1177,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
         win::WM_ERASEBKGND => 1,
         win::WM_LBUTTONDOWN => {
             let (x, y) = win::mouse_pos(hwnd, lparam);
-            if let Some(Some(deferred)) = with_app(|a| a.mouse_down(x, y)) {
-                run_deferred(hwnd, deferred);
-            }
+            with_app(|a| a.mouse_down(x, y));
             0
         }
         win::WM_MOUSEMOVE => {
@@ -1097,7 +1253,7 @@ fn main() {
         hits: Vec::new(),
         hover: None,
         drag: None,
-        custom: [0x00FF_FFFF; 16],
+        picker: None,
     };
     app.send(Cmd::Refresh);
     APP.with(|cell| *cell.borrow_mut() = Some(app));
