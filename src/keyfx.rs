@@ -68,14 +68,15 @@ impl KeyStyle {
 }
 
 /// Durée de l'éclair à la frappe, en secondes.
-pub const FLASH_SECONDS: f32 = 0.45;
+pub const FLASH_SECONDS: f32 = 0.25;
 
 /// Superpose l'éclair de frappe : `boost` vaut 1 à l'appui puis retombe à 0.
+/// Blanc franc pendant le premier tiers, puis retour rapide à la couleur de la touche.
 pub fn flash(base: Rgb, boost: f32) -> Rgb {
     if boost <= 0.0 {
         return base;
     }
-    let t = 0.7 * boost.min(1.0);
+    let t = (boost * 1.5).min(1.0);
     let f = |c: u8| (c as f32 + (255.0 - c as f32) * t).round() as u8;
     Rgb(f(base.0), f(base.1), f(base.2))
 }
@@ -158,9 +159,10 @@ mod tests {
     fn flash_brightens_then_vanishes() {
         let base = Rgb(100, 0, 0);
         assert_eq!(flash(base, 0.0), base);
-        let hit = flash(base, 1.0);
-        assert!(hit.0 > 200 && hit.1 > 150, "{hit:?}");
-        assert!(flash(base, 0.5).1 < hit.1);
+        assert_eq!(flash(base, 1.0), Rgb(255, 255, 255));
+        assert_eq!(flash(base, 0.8), Rgb(255, 255, 255), "blanc tenu au début de l'éclair");
+        let fading = flash(base, 0.3);
+        assert!(fading.1 > 0 && fading.1 < 255, "{fading:?}");
     }
 
     #[test]

@@ -41,8 +41,12 @@ const WM_TRAY: u32 = win::WM_APP + 2;
 const REFRESH_MS: u32 = 20_000;
 /// Intervalle des rondes du gardien.
 const GUARD_POLL: Duration = Duration::from_secs(3);
-/// Durée d'une image des effets par touche (environ 30 images par seconde).
-const FRAME: Duration = Duration::from_millis(33);
+/// Pause entre deux pas du moteur. Les touches sont scrutées à chaque pas.
+const FRAME: Duration = Duration::from_millis(5);
+/// Nombre de touches dont l'animation est rafraîchie à chaque pas (deux paquets via le
+/// dongle). Tout le clavier est ainsi repeint en quatre pas, sans jamais bloquer le moteur
+/// plus de quelques millisecondes : un éclair de frappe n'attend pas.
+const SLICE: usize = 28;
 const TRAY_TIP: &str = "omnictl — gardien des couleurs du clavier";
 
 const PRESETS: [Rgb; 10] = [
@@ -405,11 +409,15 @@ struct Engine {
     last: [Option<Rgb>; 256],
     /// Éclair de frappe en cours par LED : 1 à l'appui, retombe à 0.
     boost: [f32; 256],
+    /// LED dont l'éclair était visible à la dernière image.
+    flashing: [bool; 256],
     /// Les couleurs par touche sont ce que le clavier doit afficher.
     live: bool,
     react: bool,
     start: Instant,
     tick: Instant,
+    /// Première touche de la prochaine tranche d'animation.
+    cursor: usize,
 }
 
 impl Engine {
@@ -419,10 +427,12 @@ impl Engine {
             styles: store::load_styles(),
             last: [None; 256],
             boost: [0.0; 256],
+            flashing: [false; 256],
             live,
             react: store::flag("react"),
             start: now,
             tick: now,
+            cursor: 0,
         }
     }
 
@@ -445,7 +455,18 @@ impl Engine {
         }
     }
 
+    /// Un pas du moteur : tous les éclairs de frappe, plus une tranche de l'animation.
+    fn step(&mut self, dev: &mut Devices) -> Result<(), Error> {
+        self.render(dev, false)
+    }
+
+    /// Image complète, tout de suite.
     fn frame(&mut self, dev: &mut Devices) -> Result<(), Error> {
+        self.render(dev, true)
+    }
+
+    /// `full` : recalculer toutes les touches ; sinon la tranche courante et les éclairs.
+    fn render(&mut self, dev: &mut Devices, full: bool) -> Result<(), Error> {
         let now = Instant::now();
         let dt = now.duration_since(self.tick).as_secs_f32();
         self.tick = now;
@@ -458,11 +479,24 @@ impl Engine {
                 self.boost[id as usize] = 1.0;
             }
         }
+        let count = keys::KEYS.len();
+        let start = self.cursor;
+        if !full {
+            self.cursor = (start + SLICE) % count;
+        }
         let mut leds = Vec::new();
-        for key in keys::KEYS {
+        for (index, key) in keys::KEYS.iter().enumerate() {
+            let in_slice = full || (index + count - start) % count < SLICE;
             // Seules les touches colorées sont pilotées ; les autres gardent ce qu'elles ont.
             let Some((_, style)) = self.styles.iter().find(|(id, _)| *id == key.id) else { continue };
             let boost = if self.react { self.boost[key.id as usize] } else { 0.0 };
+            // Hors de la tranche, on ne touche qu'aux éclairs en cours ou tout juste finis
+            // (ces derniers doivent retrouver la couleur de leur effet sans attendre).
+            let flashing = boost > 0.0 || self.flashing[key.id as usize];
+            if !in_slice && !flashing {
+                continue;
+            }
+            self.flashing[key.id as usize] = boost > 0.0;
             let color = keyfx::flash(style.at(t, key.rect.0 as f32), boost);
             if self.last[key.id as usize] != Some(color) {
                 leds.push((key.id, color));
@@ -486,7 +520,7 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
     // Le clavier répondait-il au dernier contact ? Faux au départ : premier envoi complet.
     let mut kb_ok = false;
     loop {
-        // Trois rythmes : une image toutes les 33 ms quand quelque chose s'anime ; une ronde
+        // Trois rythmes : un pas toutes les quelques ms quand quelque chose s'anime ; une ronde
         // toutes les 3 s pour guetter le retour du clavier ; sinon, sommeil jusqu'à la
         // prochaine commande.
         let timeout = if engine.animated() && kb_ok {
@@ -509,7 +543,7 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard:
         };
         let Some(first) = first else {
             if engine.animated() && kb_ok {
-                if engine.frame(&mut dev).is_err() {
+                if engine.step(&mut dev).is_err() {
                     // Clavier endormi ou débranché : on repasse au rythme des rondes.
                     dev.kb = None;
                     kb_ok = false;
