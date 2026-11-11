@@ -1,4 +1,4 @@
-# Compile scope96 pour Windows x64 et Windows ARM64, sans Visual Studio.
+# Compile omnictl pour Windows x64 et Windows ARM64, sans Visual Studio.
 # (Fichier volontairement en ASCII : Windows PowerShell 5.1 lit mal l'UTF-8 sans BOM.)
 #
 # Prerequis :
@@ -67,8 +67,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "echec de compilation pour $t" }
         $name = 'x64'
         if ($arch -eq 'aarch64') { $name = 'arm64' }
-        Copy-Item "target\$t\$dir\scope96.exe" "dist\scope96-$name.exe" -Force
-        Copy-Item "target\$t\$dir\scope96-gui.exe" "dist\scope96-gui-$name.exe" -Force
+        Copy-Item "target\$t\$dir\omnictl.exe" "dist\omnictl-$name.exe" -Force
+        Copy-Item "target\$t\$dir\omnictl-gui.exe" "dist\omnictl-gui-$name.exe" -Force
     }
     Get-ChildItem dist\*.exe | Select-Object Name, Length
 } finally {

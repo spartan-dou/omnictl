@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "scope96"
+name = "omnictl"
 version = "0.1.0"

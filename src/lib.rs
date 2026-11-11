@@ -1,4 +1,4 @@
-//! Bibliothèque commune à la ligne de commande (`scope96`) et à l'interface (`scope96-gui`).
+//! Bibliothèque commune à la ligne de commande (`omnictl`) et à l'interface (`omnictl-gui`).
 
 pub mod hid;
 pub mod json;

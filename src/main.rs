@@ -1,12 +1,12 @@
-use scope96::link::{self, Error, Link, Via};
-use scope96::proto::{self, Direction, Effect, Keyboard, Mode, Rgb, Speed};
-use scope96::{keys, mcp, store};
+use omnictl::link::{self, Error, Link, Via};
+use omnictl::proto::{self, Direction, Effect, Keyboard, Mode, Rgb, Speed};
+use omnictl::{keys, mcp, store};
 
 const USAGE: &str = "\
-scope96 — contrôle du clavier ASUS ROG Strix Scope II 96 Wireless
+omnictl — contrôle du clavier ASUS ROG Strix Scope II 96 Wireless
 
 UTILISATION
-  scope96 [--usb|--dongle] [-v] <commande> [arguments]
+  omnictl [--usb|--dongle] [-v] <commande> [arguments]
 
 COMMANDES
   info                        connexion, firmware, batterie, réglages
@@ -39,10 +39,10 @@ COULEURS  #rrggbb, rrggbb, #rgb, ou un nom : red/rouge, green/vert, blue/bleu, w
           yellow/jaune, cyan, magenta, orange, purple/violet, pink/rose, off/noir
 
 EXEMPLES
-  scope96 static 00a0ff --brightness 60 --save
-  scope96 effect breathing rouge bleu --speed slow
-  scope96 effect wave --direction right
-  scope96 keys --base 101010 zqsd=rouge esc=blanc space=cyan arrows=orange
+  omnictl static 00a0ff --brightness 60 --save
+  omnictl effect breathing rouge bleu --speed slow
+  omnictl effect wave --direction right
+  omnictl keys --base 101010 zqsd=rouge esc=blanc space=cyan arrows=orange
 ";
 
 fn main() {
@@ -159,7 +159,7 @@ fn effect_from(args: &Args, mode: Mode, colors: &[String]) -> Result<Effect, Err
 fn one<'a>(rest: &'a [String], usage: &str) -> Result<&'a str, Error> {
     match rest {
         [v] => Ok(v.as_str()),
-        _ => msg(format!("utilisation : scope96 {usage}")),
+        _ => msg(format!("utilisation : omnictl {usage}")),
     }
 }
 
@@ -229,10 +229,10 @@ fn run() -> Result<(), Error> {
         "effect" => {
             args.allow(EFFECT_OPTS)?;
             let Some(name) = rest.first() else {
-                return msg("utilisation : scope96 effect <mode> [couleurs...]");
+                return msg("utilisation : omnictl effect <mode> [couleurs...]");
             };
             let Some(mode) = Mode::parse(name) else {
-                return msg(format!("mode inconnu : « {name} » (voir scope96 help)"));
+                return msg(format!("mode inconnu : « {name} » (voir omnictl help)"));
             };
             let e = effect_from(&args, mode, &rest[1..])?;
             let mut kb = open(&args)?;
@@ -255,7 +255,7 @@ fn run() -> Result<(), Error> {
         "keys" => {
             args.allow(&["--base"])?;
             if rest.is_empty() && args.value("--base").is_none() {
-                return msg("utilisation : scope96 keys [--base <couleur>] <touche>=<couleur>...");
+                return msg("utilisation : omnictl keys [--base <couleur>] <touche>=<couleur>...");
             }
             let legends = keys::layout_legends();
             let mut leds: Vec<(u8, Rgb)> = Vec::new();
@@ -275,7 +275,7 @@ fn run() -> Result<(), Error> {
                 };
                 let c = color(col)?;
                 let Some(ids) = keys::resolve(name, &legends) else {
-                    return msg(format!("touche inconnue : « {name} » (voir scope96 list)"));
+                    return msg(format!("touche inconnue : « {name} » (voir omnictl list)"));
                 };
                 for id in ids {
                     set(id, c);
@@ -380,7 +380,7 @@ fn run() -> Result<(), Error> {
             let r = kb.link.request(&bytes)?;
             println!("{}", link::hex(&r));
         }
-        other => return msg(format!("commande inconnue : « {other} » (scope96 help pour l'aide)")),
+        other => return msg(format!("commande inconnue : « {other} » (omnictl help pour l'aide)")),
     }
     Ok(())
 }

@@ -446,7 +446,7 @@ pub fn dark_mode() -> bool {
 pub fn create_window(title: &str, w: f32, h: f32, dark: bool, proc: WNDPROC) -> HWND {
     unsafe {
         let instance = GetModuleHandleW(null());
-        let class = wide("scope96");
+        let class = wide("omnictl");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: 0,
@@ -545,7 +545,7 @@ pub fn post(hwnd_bits: usize, msg: u32) {
 }
 
 pub fn error_box(text: &str) {
-    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("scope96").as_ptr(), 0x10) };
+    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("omnictl").as_ptr(), 0x10) };
 }
 
 /// Position du curseur d'un message souris, en pixels logiques.

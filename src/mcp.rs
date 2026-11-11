@@ -1,6 +1,6 @@
 //! Serveur MCP (Model Context Protocol) sur l'entrée/sortie standard.
 //!
-//! `scope96 mcp` lit des messages JSON-RPC 2.0, un par ligne, sur stdin et répond sur stdout.
+//! `omnictl mcp` lit des messages JSON-RPC 2.0, un par ligne, sur stdin et répond sur stdout.
 //! Aucun port réseau n'est ouvert : c'est le client MCP (Claude Desktop, Claude Code…) qui
 //! lance le programme et lui parle par ses tubes. Rien d'autre que du JSON-RPC ne doit
 //! sortir sur stdout ; les diagnostics vont sur stderr.
@@ -128,7 +128,7 @@ fn handle_line(line: &str) -> Option<String> {
                 id,
                 &format!(
                     "{{\"protocolVersion\":{},\"capabilities\":{{\"tools\":{{}}}},\
-                     \"serverInfo\":{{\"name\":\"scope96\",\"version\":{}}},\
+                     \"serverInfo\":{{\"name\":\"omnictl\",\"version\":{}}},\
                      \"instructions\":{}}}",
                     json::quote(version),
                     json::quote(env!("CARGO_PKG_VERSION")),

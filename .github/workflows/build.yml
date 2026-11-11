@@ -37,14 +37,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/scope96.exe dist/scope96-x64.exe
-          Copy-Item target/x86_64-pc-windows-msvc/release/scope96-gui.exe dist/scope96-gui-x64.exe
-          Copy-Item target/aarch64-pc-windows-msvc/release/scope96.exe dist/scope96-arm64.exe
-          Copy-Item target/aarch64-pc-windows-msvc/release/scope96-gui.exe dist/scope96-gui-arm64.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/omnictl.exe dist/omnictl-x64.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/omnictl-gui.exe dist/omnictl-gui-x64.exe
+          Copy-Item target/aarch64-pc-windows-msvc/release/omnictl.exe dist/omnictl-arm64.exe
+          Copy-Item target/aarch64-pc-windows-msvc/release/omnictl-gui.exe dist/omnictl-gui-arm64.exe
           Get-ChildItem dist | Select-Object Name, Length
 
       - uses: actions/upload-artifact@v4
         with:
-          name: scope96-windows
+          name: omnictl-windows
           path: dist/*.exe
           if-no-files-found: error

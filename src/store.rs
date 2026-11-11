@@ -2,15 +2,15 @@
 //!
 //! Le clavier ne sait pas enregistrer une couleur par touche : le mode direct est volatil.
 //! On garde donc la dernière carte appliquée dans un petit fichier texte
-//! (`%APPDATA%\scope96\keys.txt`, une ligne `id=rrggbb` par touche) pour pouvoir la
-//! réappliquer avec `scope96 apply`.
+//! (`%APPDATA%\omnictl\keys.txt`, une ligne `id=rrggbb` par touche) pour pouvoir la
+//! réappliquer avec `omnictl apply`.
 
 use crate::proto::Rgb;
 use std::path::PathBuf;
 
 pub fn path() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(base).join("scope96").join("keys.txt"))
+    Some(PathBuf::from(base).join("omnictl").join("keys.txt"))
 }
 
 pub fn load() -> Vec<(u8, Rgb)> {

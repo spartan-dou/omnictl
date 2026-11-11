@@ -1,4 +1,4 @@
-//! Interface graphique de scope96 : une fenêtre Windows native, entièrement dessinée par le
+//! Interface graphique de omnictl : une fenêtre Windows native, entièrement dessinée par le
 //! programme (voir `win.rs`), sans bibliothèque graphique.
 //!
 //! Architecture : le fil de l'interface ne parle jamais au clavier. Il envoie des commandes à
@@ -10,10 +10,10 @@
 
 mod win;
 
-use scope96::keys;
-use scope96::link::{Error, Link};
-use scope96::proto::{self, Connection, Direction, Effect, Keyboard, Mode, Rgb, Speed};
-use scope96::store;
+use omnictl::keys;
+use omnictl::link::{Error, Link};
+use omnictl::proto::{self, Connection, Direction, Effect, Keyboard, Mode, Rgb, Speed};
+use omnictl::store;
 use std::cell::RefCell;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -226,8 +226,8 @@ fn snapshot(slot: &mut Option<Keyboard>) -> Result<Snapshot, Error> {
     let pw = kb.power()?;
     Ok(Snapshot {
         via: match kb.link.via {
-            scope96::link::Via::Usb => "USB",
-            scope96::link::Via::Dongle => "2,4 GHz",
+            omnictl::link::Via::Usb => "USB",
+            omnictl::link::Via::Dongle => "2,4 GHz",
         },
         firmware: st.firmware,
         profile: st.profile,
@@ -734,11 +734,11 @@ impl App {
 
     fn draw_header(&self, ui: &mut Ui) {
         let t = self.theme;
-        // « 96 » en couleur d'accent, accolé à « scope » : GDI+ ajoute une marge d'environ
+        // « ctl » en couleur d'accent, accolé à « omni » : GDI+ ajoute une marge d'environ
         // un sixième de cadratin de chaque côté d'un texte, qu'on retire à la jonction.
-        let scope_w = ui.c.text_width("scope", 23.0, true);
-        ui.c.text("scope", rc(M, 20.0, scope_w + 4.0, 34.0), 23.0, true, t.text, Align::Left);
-        ui.c.text("96", rc(M + scope_w - 23.0 / 3.0, 20.0, 60.0, 34.0), 23.0, true, t.accent, Align::Left);
+        let omni_w = ui.c.text_width("omni", 23.0, true);
+        ui.c.text("omni", rc(M, 20.0, omni_w + 4.0, 34.0), 23.0, true, t.text, Align::Left);
+        ui.c.text("ctl", rc(M + omni_w - 23.0 / 3.0, 20.0, 60.0, 34.0), 23.0, true, t.accent, Align::Left);
         let status = match &self.snap {
             Some(s) => format!(
                 "{}   ·   {} %{}   ·   firmware {}",
@@ -1057,7 +1057,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
 fn main() {
     win::init();
     let dark = win::dark_mode();
-    let hwnd = win::create_window("scope96", W, H, dark, wndproc);
+    let hwnd = win::create_window("omnictl", W, H, dark, wndproc);
     if hwnd.is_null() {
         win::error_box("Impossible de créer la fenêtre.");
         return;
@@ -1078,7 +1078,7 @@ fn main() {
         message: String::new(),
         is_error: false,
         synced: false,
-        // `scope96-gui keys` ou `settings` ouvre directement l'onglet voulu.
+        // `omnictl-gui keys` ou `settings` ouvre directement l'onglet voulu.
         tab: match std::env::args().nth(1).as_deref() {
             Some("keys") => Tab::Keys,
             Some("settings") => Tab::Settings,

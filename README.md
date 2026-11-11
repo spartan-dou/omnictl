@@ -1,4 +1,4 @@
-# scope96
+# omnictl
 
 Contrôleur libre et léger pour le clavier **ASUS ROG Strix Scope II 96 Wireless**, écrit pour
 continuer à l'utiliser pleinement là où Armoury Crate ne fonctionne pas — en particulier sur
@@ -29,18 +29,18 @@ Windows ARM64.
 ## Utilisation
 
 ```
-scope96 info
-scope96 static 00a0ff --brightness 60 --save
-scope96 effect breathing rouge bleu --speed slow
-scope96 effect wave --direction right
-scope96 keys --base 101010 zqsd=rouge esc=blanc space=cyan arrows=orange
-scope96 apply
-scope96 sleep 10
-scope96 help
+omnictl info
+omnictl static 00a0ff --brightness 60 --save
+omnictl effect breathing rouge bleu --speed slow
+omnictl effect wave --direction right
+omnictl keys --base 101010 zqsd=rouge esc=blanc space=cyan arrows=orange
+omnictl apply
+omnictl sleep 10
+omnictl help
 ```
 
-`scope96 help` donne la liste complète des commandes, des effets et des options ;
-`scope96 list` celle des noms de touches et de groupes.
+`omnictl help` donne la liste complète des commandes, des effets et des options ;
+`omnictl list` celle des noms de touches et de groupes.
 
 Deux choses à savoir :
 
@@ -48,7 +48,7 @@ Deux choses à savoir :
   sans logiciel, y compris en Bluetooth ou branché sur une autre machine.
 - **Les couleurs touche par touche sont tenues par l'ordinateur.** Le clavier ne sait pas les
   mémoriser : il les perd à la mise en veille ou à l'extinction. La dernière carte appliquée
-  est gardée dans `%APPDATA%\scope96\keys.txt` et `scope96 apply` la remet en place.
+  est gardée dans `%APPDATA%\omnictl\keys.txt` et `omnictl apply` la remet en place.
 
 Les noms de touches sont positionnels (ceux d'un QWERTY US), mais une lettre seule désigne la
 touche qui porte réellement cette lettre dans la disposition active : sur un AZERTY, `a=rouge`
@@ -56,13 +56,13 @@ colore bien la touche A.
 
 ### Éclairage dynamique Windows
 
-Le clavier expose aussi l'interface standard HID LampArray. Avec `scope96 wdl on`, Windows 11
+Le clavier expose aussi l'interface standard HID LampArray. Avec `omnictl wdl on`, Windows 11
 peut piloter l'éclairage lui-même (Paramètres → Personnalisation → Éclairage dynamique), sans
 aucun logiciel tiers.
 
 ## Serveur MCP
 
-`scope96 mcp` parle le [Model Context Protocol](https://modelcontextprotocol.io) sur son
+`omnictl mcp` parle le [Model Context Protocol](https://modelcontextprotocol.io) sur son
 entrée/sortie standard ; aucun port réseau n'est ouvert. Outils exposés : `keyboard_status`,
 `set_effect`, `set_key_colors`, `apply_saved_keys`, `list_keys`, `set_power`, `set_profile`,
 `set_dynamic_lighting`.
@@ -70,7 +70,7 @@ entrée/sortie standard ; aucun port réseau n'est ouvert. Outils exposés : `ke
 Claude Code :
 
 ```
-claude mcp add scope96 -- C:\chemin\vers\scope96.exe mcp
+claude mcp add omnictl -- C:\chemin\vers\omnictl.exe mcp
 ```
 
 Claude Desktop (`claude_desktop_config.json`) :
@@ -78,7 +78,7 @@ Claude Desktop (`claude_desktop_config.json`) :
 ```json
 {
   "mcpServers": {
-    "scope96": { "command": "C:\\chemin\\vers\\scope96.exe", "args": ["mcp"] }
+    "omnictl": { "command": "C:\\chemin\\vers\\omnictl.exe", "args": ["mcp"] }
   }
 }
 ```
@@ -98,7 +98,7 @@ Sous Windows, sans Visual Studio :
 powershell -ExecutionPolicy Bypass -File build.ps1 -Test
 ```
 
-Les exécutables sont produits dans `dist\` : `scope96-x64.exe` et `scope96-arm64.exe`.
+Les exécutables sont produits dans `dist\` : `omnictl-x64.exe` et `omnictl-arm64.exe`.
 
 ### Smart App Control
 
@@ -113,7 +113,7 @@ signature de code reconnue par Windows règle la question durablement.
 | Câble USB | `0B05:1AAE` | usage page `FF00`, rapports de 64 octets |
 | Dongle ROG Omni | `0B05:1ACE` | usage page `FF00`, report ID 2 + 63 octets |
 
-Le dongle Omni peut aussi porter une souris sur un second canal (`FF01`) ; scope96 n'y touche pas.
+Le dongle Omni peut aussi porter une souris sur un second canal (`FF01`) ; omnictl n'y touche pas.
 
 ## Licence et remerciements
 
