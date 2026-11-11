@@ -332,7 +332,8 @@ impl Keyboard {
         let r = self.link.request(&[0x12, 0x01])?;
         Ok(Power {
             percent: r[5],
-            sleep: r[6],
+            // « Jamais » s'écrit avec l'index 5 mais se relit `FF` (mesuré).
+            sleep: if r[6] == 0xFF { 5 } else { r[6] },
             saving: r[7],
             charging: r[8] == 1,
             low_alert: r[9],

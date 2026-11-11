@@ -97,7 +97,7 @@ Tous de la forme `51 xx 00 00 valeur`, acquittés par `51 xx`. [P]
 | Commande | Réglage | Valeurs |
 |---|---|---|
 | `51 00` | profil actif | 0 = profil par défaut, 1 à 6 |
-| `51 38` | délai de veille | index 0-5 : 1, 2, 3, 5, 10 min, jamais |
+| `51 38` | délai de veille | index 0-5 : 1, 2, 3, 5, 10 min, jamais. Vérifié [M] ; « jamais » se relit `FF` dans `12 01` |
 | `51 39` | économie d'énergie | 0 non, 1 éteindre l'éclairage, 2 réduire la luminosité |
 | `51 3A` | alerte batterie faible | pourcentage |
 | `51 31` | fréquence de scrutation | codage non établi |
