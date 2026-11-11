@@ -10,8 +10,12 @@ use crate::proto::Rgb;
 use std::path::PathBuf;
 
 pub fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(base).join("omnictl").join("keys.txt"))
+    // Windows : %APPDATA%. Ailleurs : $XDG_CONFIG_HOME, ou ~/.config à défaut.
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")))?;
+    Some(base.join("omnictl").join("keys.txt"))
 }
 
 fn parse_line(line: &str) -> Option<(u8, KeyStyle)> {

@@ -56,18 +56,69 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain Rust (x64 + ARM64) et éditeur de liens ARM64
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu
+
+      - name: Tests
+        run: cargo test
+
+      - name: Compilation x64
+        run: cargo build --release --bin omnictl
+
+      - name: Compilation ARM64
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --bin omnictl --target aarch64-unknown-linux-gnu
+
+      - name: Rassembler les exécutables
+        run: |
+          mkdir -p dist
+          cp target/release/omnictl dist/omnictl-linux-x64
+          cp target/aarch64-unknown-linux-gnu/release/omnictl dist/omnictl-linux-arm64
+          cp linux/60-omnictl.rules dist/
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnictl-linux
+          path: dist/*
+          if-no-files-found: error
+
   # Un tag « v… » publie une release avec les exécutables compilés ci-dessus.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows
+    needs: [windows, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: omnictl-windows
           path: dist
+          merge-multiple: true
+
+      - name: Empreintes et numéro de version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          # Une seule liste d'empreintes pour tous les fichiers, et le numéro de version
+          # que l'application consulte pour savoir si elle est à jour.
+          rm -f SHA256SUMS.txt
+          sha256sum * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          echo "${TAG#v}" > VERSION
+          cat SHA256SUMS.txt VERSION
 
       - name: Publier la release
         env:

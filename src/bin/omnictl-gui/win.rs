@@ -860,3 +860,73 @@ pub fn foreground_exe() -> Option<String> {
         (!name.is_empty()).then_some(name)
     }
 }
+
+// ───────────── Instance unique, téléchargement, empreinte ─────────────
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateMutexW(security: *const c_void, owner: i32, name: *const u16) -> HANDLE;
+    fn GetLastError() -> u32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
+}
+
+#[link(name = "urlmon")]
+extern "system" {
+    fn URLDownloadToFileW(caller: *mut c_void, url: *const u16, file: *const u16, reserved: u32, callback: *mut c_void) -> i32;
+}
+
+#[link(name = "wininet")]
+extern "system" {
+    fn DeleteUrlCacheEntryW(url: *const u16) -> i32;
+}
+
+#[link(name = "bcrypt")]
+extern "system" {
+    fn BCryptOpenAlgorithmProvider(handle: *mut HANDLE, algorithm: *const u16, implementation: *const u16, flags: u32) -> i32;
+    fn BCryptHash(algorithm: HANDLE, secret: *mut u8, secret_len: u32, input: *const u8, input_len: u32, output: *mut u8, output_len: u32) -> i32;
+    fn BCryptCloseAlgorithmProvider(handle: HANDLE, flags: u32) -> i32;
+}
+
+/// Vrai si omnictl tourne déjà dans cette session ; sa fenêtre reçoit alors `show_msg`
+/// pour venir au premier plan. Le verrou vit aussi longtemps que le processus.
+pub fn already_running(show_msg: u32) -> bool {
+    unsafe {
+        CreateMutexW(null(), 0, wide("Local\\omnictl-gui").as_ptr());
+        if GetLastError() != 183 {
+            return false; // ERROR_ALREADY_EXISTS
+        }
+        let existing = FindWindowW(wide("omnictl").as_ptr(), null());
+        if !existing.is_null() {
+            PostMessageW(existing, show_msg, 0, 0);
+        }
+        true
+    }
+}
+
+/// Télécharge `url` dans le fichier `to` (HTTPS, réglages réseau de Windows).
+pub fn download(url: &str, to: &std::path::Path) -> bool {
+    let url = wide(url);
+    let Some(path) = to.to_str() else { return false };
+    unsafe {
+        DeleteUrlCacheEntryW(url.as_ptr()); // toujours la version en ligne, pas une copie en cache
+        URLDownloadToFileW(null_mut(), url.as_ptr(), wide(path).as_ptr(), 0, null_mut()) == 0
+    }
+}
+
+/// Empreinte SHA-256, calculée par Windows.
+pub fn sha256(data: &[u8]) -> Option<[u8; 32]> {
+    let mut out = [0u8; 32];
+    unsafe {
+        let mut algorithm = null_mut();
+        if BCryptOpenAlgorithmProvider(&mut algorithm, wide("SHA256").as_ptr(), null(), 0) != 0 {
+            return None;
+        }
+        let status = BCryptHash(algorithm, null_mut(), 0, data.as_ptr(), data.len() as u32, out.as_mut_ptr(), 32);
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        (status == 0).then_some(out)
+    }
+}

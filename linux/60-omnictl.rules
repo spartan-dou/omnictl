@@ -1,0 +1,7 @@
+# Donne à l'utilisateur connecté l'accès aux périphériques ASUS ROG pilotés par omnictl
+# (clavier Strix Scope II 96 Wireless en USB, dongle ROG Omni), sans passer par root.
+#
+#   sudo cp 60-omnictl.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1aae", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ace", TAG+="uaccess"

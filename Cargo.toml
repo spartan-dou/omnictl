@@ -1,6 +1,6 @@
 [package]
 name = "omnictl"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Contrôleur léger et libre pour les périphériques ASUS ROG (clavier Strix Scope II 96 Wireless, dongle Omni)"
 license = "GPL-2.0-or-later"
