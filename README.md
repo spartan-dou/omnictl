@@ -21,12 +21,19 @@ Les exécutables sont sur la page [Releases](../../releases) :
 |---|---|
 | `omnictl-gui-x64.exe` / `omnictl-gui-arm64.exe` | interface graphique |
 | `omnictl-x64.exe` / `omnictl-arm64.exe` | ligne de commande et serveur MCP |
+| `omnictl-linux-x64` / `omnictl-linux-arm64` | ligne de commande et serveur MCP pour Linux |
+| `60-omnictl.rules` | règle udev donnant accès aux périphériques sous Linux |
 
-Ils ne sont pas signés : voir [Smart App Control](#smart-app-control).
+Les exécutables Windows ne sont pas signés : voir [Smart App Control](#smart-app-control).
+
+L'interface vérifie au démarrage si une version plus récente est publiée ici et propose de
+l'installer : un clic télécharge les fichiers, contrôle leur empreinte SHA-256, les remplace
+et relance l'application. Rien n'est installé sans ce clic.
 
 ## Interface graphique
 
-Un volet par appareil (clavier, souris), avec sa batterie.
+Un volet par appareil (clavier, souris), avec sa batterie. L'application garde une icône près
+de l'horloge (clic pour la rouvrir, clic droit pour quitter) et ne s'ouvre qu'en un exemplaire.
 
 **Clavier**
 
@@ -107,7 +114,21 @@ Claude Desktop (`claude_desktop_config.json`) :
 | Bluetooth | non pris en charge (le clavier n'y accepte que les effets intégrés, pas le touche par touche) |
 | Remappage de touches, macros, réglage de la molette | commandes identifiées, non implémentées |
 | Mise à jour de firmware | hors périmètre, volontairement |
-| Linux, macOS | non pris en charge |
+| Mise à jour depuis les releases | vérifiée de bout en bout (0.2.9 → 0.3.0) |
+| Linux : ligne de commande et serveur MCP | compilés et testés automatiquement (x64, ARM64), **pas encore essayés sur du matériel** |
+| Linux : interface graphique ; macOS | non pris en charge |
+
+## Linux
+
+```
+chmod +x omnictl-linux-x64
+sudo cp 60-omnictl.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+./omnictl-linux-x64 info
+```
+
+Seules la ligne de commande et le serveur MCP existent sous Linux. La réaction à la frappe,
+les effets par touche animés et les profils par application dépendent de l'interface Windows.
 
 ## Compilation
 
