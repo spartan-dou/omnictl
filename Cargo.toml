@@ -1,0 +1,16 @@
+[package]
+name = "scope96"
+version = "0.1.0"
+edition = "2021"
+description = "Contrôleur léger et libre pour le clavier ASUS ROG Strix Scope II 96 Wireless"
+license = "GPL-2.0-or-later"
+
+# Aucune dépendance : bibliothèque standard + appels directs à l'API HID de Windows.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
