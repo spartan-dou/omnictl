@@ -48,3 +48,36 @@ pub fn merge(changes: &[(u8, Rgb)]) -> Vec<(u8, Rgb)> {
     }
     all
 }
+
+/// Réglage oui/non, mémorisé par la présence d'un fichier témoin vide.
+fn flag_path(name: &str) -> Option<PathBuf> {
+    Some(path()?.with_file_name(name))
+}
+
+pub fn flag(name: &str) -> bool {
+    flag_path(name).is_some_and(|p| p.exists())
+}
+
+pub fn set_flag(name: &str, on: bool) -> std::io::Result<()> {
+    let path = flag_path(name).ok_or_else(|| std::io::Error::other("dossier de configuration introuvable"))?;
+    if on {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, "")
+    } else if path.exists() {
+        std::fs::remove_file(path)
+    } else {
+        Ok(())
+    }
+}
+
+/// Gardien : l'interface, restée en arrière-plan, renvoie les couleurs touche par touche
+/// au clavier chaque fois qu'il se réveille ou se reconnecte.
+pub fn guard() -> bool {
+    flag("guard")
+}
+
+pub fn set_guard(on: bool) -> std::io::Result<()> {
+    set_flag("guard", on)
+}

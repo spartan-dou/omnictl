@@ -15,6 +15,8 @@ pub type HDC = *mut c_void;
 pub type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize;
 
 pub const WM_DESTROY: u32 = 0x0002;
+pub const WM_SIZE: u32 = 0x0005;
+pub const WM_SETTINGCHANGE: u32 = 0x001A;
 pub const WM_PAINT: u32 = 0x000F;
 pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_TIMER: u32 = 0x0113;
@@ -27,8 +29,10 @@ pub const WM_APP: u32 = 0x8000;
 const WS_CAPTION: u32 = 0x00C0_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
 const WS_MINIMIZEBOX: u32 = 0x0002_0000;
-/// Fenêtre de taille fixe : barre de titre, fermeture, réduction.
-pub const WINDOW_STYLE: u32 = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+const WS_THICKFRAME: u32 = 0x0004_0000;
+const WS_MAXIMIZEBOX: u32 = 0x0001_0000;
+/// Fenêtre ordinaire : redimensionnable, agrandissable en plein écran, réductible.
+pub const WINDOW_STYLE: u32 = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const SRCCOPY: u32 = 0x00CC_0020;
 
@@ -254,15 +258,18 @@ pub enum Align {
     Right,
 }
 
-/// Surface de dessin lissée. Coordonnées logiques, multipliées par l'échelle DPI au tracé.
+/// Surface de dessin lissée. Coordonnées logiques, mises à l'échelle et décalées au tracé
+/// (voir [`view`]).
 pub struct Canvas {
     g: *mut c_void,
     family: *mut c_void,
     scale: f32,
+    ox: f32,
+    oy: f32,
 }
 
 impl Canvas {
-    fn new(hdc: HDC, scale: f32) -> Canvas {
+    fn new(hdc: HDC, (scale, ox, oy): (f32, f32, f32)) -> Canvas {
         let mut g = null_mut();
         let mut family = null_mut();
         unsafe {
@@ -272,7 +279,7 @@ impl Canvas {
             GdipSetTextRenderingHint(g, 4);
             GdipCreateFontFamilyFromName(wide("Segoe UI").as_ptr(), null_mut(), &mut family);
         }
-        Canvas { g, family, scale }
+        Canvas { g, family, scale, ox, oy }
     }
 
     pub fn clear(&self, color: u32) {
@@ -291,7 +298,7 @@ impl Canvas {
     /// Chemin d'un rectangle arrondi, en pixels physiques.
     fn round_path(&self, r: Rc, radius: f32) -> *mut c_void {
         let s = self.scale;
-        let (x, y, w, h) = (r.x * s, r.y * s, r.w * s, r.h * s);
+        let (x, y, w, h) = (r.x * s + self.ox, r.y * s + self.oy, r.w * s, r.h * s);
         let d = (radius * 2.0 * s).min(w).min(h).max(0.01);
         let mut path = null_mut();
         unsafe {
@@ -328,14 +335,14 @@ impl Canvas {
     pub fn bar(&self, r: Rc, color: u32) {
         let s = self.scale;
         self.with_brush(color, |brush| unsafe {
-            GdipFillRectangle(self.g, brush, r.x * s, r.y * s, r.w * s, r.h * s);
+            GdipFillRectangle(self.g, brush, r.x * s + self.ox, r.y * s + self.oy, r.w * s, r.h * s);
         });
     }
 
     /// Dégradé linéaire entre deux couleurs, horizontal ou vertical.
     pub fn gradient(&self, r: Rc, from: u32, to: u32, vertical: bool) {
         let s = self.scale;
-        let rect = RectF { x: r.x * s, y: r.y * s, w: r.w * s, h: r.h * s };
+        let rect = RectF { x: r.x * s + self.ox, y: r.y * s + self.oy, w: r.w * s, h: r.h * s };
         let mut brush = null_mut();
         unsafe {
             // Mode « mosaïque en miroir » : pas de liseré d'une autre couleur sur les bords.
@@ -376,7 +383,7 @@ impl Canvas {
     pub fn text(&self, text: &str, r: Rc, size: f32, bold: bool, color: u32, align: Align) {
         let s = self.scale;
         let w = wide(text);
-        let layout = RectF { x: r.x * s, y: r.y * s, w: r.w * s, h: r.h * s };
+        let layout = RectF { x: r.x * s + self.ox, y: r.y * s + self.oy, w: r.w * s, h: r.h * s };
         let mut font = null_mut();
         let mut format = null_mut();
         unsafe {
@@ -446,7 +453,7 @@ pub fn dark_mode() -> bool {
 }
 
 /// Crée la fenêtre principale, de taille cliente `w` × `h` en pixels logiques.
-pub fn create_window(title: &str, w: f32, h: f32, dark: bool, proc: WNDPROC) -> HWND {
+pub fn create_window(title: &str, w: f32, h: f32, dark: bool, visible: bool, proc: WNDPROC) -> HWND {
     unsafe {
         let instance = GetModuleHandleW(null());
         let class = wide("omnictl");
@@ -490,9 +497,10 @@ pub fn create_window(title: &str, w: f32, h: f32, dark: bool, proc: WNDPROC) -> 
             let (cw, ch) = window_size(w, h, actual);
             SetWindowPos(hwnd, null_mut(), 0, 0, cw, ch, 0x0002 | 0x0004); // NOMOVE | NOZORDER
         }
-        let flag = dark as i32;
-        DwmSetWindowAttribute(hwnd, 20, &flag as *const i32 as *const c_void, 4); // barre de titre sombre
-        ShowWindow(hwnd, 5);
+        set_title_dark(hwnd, dark);
+        if visible {
+            ShowWindow(hwnd, 5);
+        }
         hwnd
     }
 }
@@ -504,8 +512,20 @@ fn window_size(w: f32, h: f32, dpi: u32) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
-pub fn scale(hwnd: HWND) -> f32 {
-    unsafe { GetDpiForWindow(hwnd) as f32 / 96.0 }
+/// Cadrage du contenu logique `w` × `h` dans la fenêtre : le plus grand possible sans
+/// déformation, centré. Renvoie (échelle, décalage x, décalage y) en pixels physiques.
+pub fn view(hwnd: HWND, w: f32, h: f32) -> (f32, f32, f32) {
+    let mut client = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut client) };
+    let (cw, ch) = (client.right.max(1) as f32, client.bottom.max(1) as f32);
+    let scale = (cw / w).min(ch / h);
+    (scale, ((cw - w * scale) / 2.0).round(), ((ch - h * scale) / 2.0).round())
+}
+
+/// Applique le thème clair ou sombre à la barre de titre.
+pub fn set_title_dark(hwnd: HWND, dark: bool) {
+    let flag = dark as i32;
+    unsafe { DwmSetWindowAttribute(hwnd, 20, &flag as *const i32 as *const c_void, 4) };
 }
 
 /// Réponse à WM_DPICHANGED : adopte le rectangle proposé par Windows.
@@ -551,16 +571,17 @@ pub fn error_box(text: &str) {
     unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("omnictl").as_ptr(), 0x10) };
 }
 
-/// Position du curseur d'un message souris, en pixels logiques.
-pub fn mouse_pos(hwnd: HWND, lparam: isize) -> (f32, f32) {
-    let s = scale(hwnd);
+/// Position du curseur d'un message souris, en pixels logiques du contenu `w` × `h`.
+pub fn mouse_pos(hwnd: HWND, lparam: isize, w: f32, h: f32) -> (f32, f32) {
+    let (s, ox, oy) = view(hwnd, w, h);
     let x = (lparam & 0xFFFF) as u16 as i16 as f32;
     let y = ((lparam >> 16) & 0xFFFF) as u16 as i16 as f32;
-    (x / s, y / s)
+    ((x - ox) / s, (y - oy) / s)
 }
 
 /// Peint la fenêtre dans un tampon hors écran (pas de scintillement), puis le recopie.
-pub fn paint(hwnd: HWND, draw: impl FnOnce(&Canvas)) {
+/// `lw` × `lh` est la taille logique du contenu, cadré par [`view`].
+pub fn paint(hwnd: HWND, lw: f32, lh: f32, draw: impl FnOnce(&Canvas)) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
@@ -571,7 +592,7 @@ pub fn paint(hwnd: HWND, draw: impl FnOnce(&Canvas)) {
         let bitmap = CreateCompatibleBitmap(hdc, w, h);
         let previous = SelectObject(mem, bitmap);
         {
-            let canvas = Canvas::new(mem, scale(hwnd));
+            let canvas = Canvas::new(mem, view(hwnd, lw, lh));
             draw(&canvas);
         } // le Canvas est libéré avant le contexte qu'il dessine
         BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
@@ -580,4 +601,132 @@ pub fn paint(hwnd: HWND, draw: impl FnOnce(&Canvas)) {
         DeleteDC(mem);
         EndPaint(hwnd, &ps);
     }
+}
+
+// ───────────── Arrière-plan : icône de notification, menu, démarrage avec Windows ─────────────
+
+pub const WM_CLOSE: u32 = 0x0010;
+pub const WM_RBUTTONUP: u32 = 0x0205;
+
+#[repr(C)]
+struct NOTIFYICONDATAW {
+    cbSize: u32,
+    hWnd: HWND,
+    uID: u32,
+    uFlags: u32,
+    uCallbackMessage: u32,
+    hIcon: HANDLE,
+    szTip: [u16; 128],
+    dwState: u32,
+    dwStateMask: u32,
+    szInfo: [u16; 256],
+    uVersion: u32,
+    szInfoTitle: [u16; 64],
+    dwInfoFlags: u32,
+    guidItem: [u8; 16],
+    hBalloonIcon: HANDLE,
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn Shell_NotifyIconW(message: u32, data: *const NOTIFYICONDATAW) -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn LoadIconW(instance: HANDLE, name: *const u16) -> HANDLE;
+    fn CreatePopupMenu() -> HANDLE;
+    fn AppendMenuW(menu: HANDLE, flags: u32, id: usize, text: *const u16) -> i32;
+    fn TrackPopupMenu(menu: HANDLE, flags: u32, x: i32, y: i32, reserved: i32, hwnd: HWND, rect: *const RECT) -> i32;
+    fn DestroyMenu(menu: HANDLE) -> i32;
+    fn GetCursorPos(point: *mut [i32; 2]) -> i32;
+    fn SetForegroundWindow(hwnd: HWND) -> i32;
+    fn DestroyWindow(hwnd: HWND) -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegSetKeyValueW(key: HANDLE, subkey: *const u16, value: *const u16, kind: u32, data: *const c_void, size: u32) -> i32;
+    fn RegDeleteKeyValueW(key: HANDLE, subkey: *const u16, value: *const u16) -> i32;
+}
+
+fn tray_data(hwnd: HWND, callback: u32, tip: &str) -> NOTIFYICONDATAW {
+    let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    data.hWnd = hwnd;
+    data.uID = 1;
+    data.uFlags = 0x1 | 0x2 | 0x4; // MESSAGE | ICON | TIP
+    data.uCallbackMessage = callback;
+    data.hIcon = unsafe { LoadIconW(null_mut(), 32512 as *const u16) }; // icône d'application standard
+    for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
+        *slot = unit;
+    }
+    data
+}
+
+/// Ajoute l'icône dans la zone de notification. Les clics arrivent à la fenêtre sous la
+/// forme du message `callback`, avec le message souris d'origine dans `lparam`.
+pub fn tray_add(hwnd: HWND, callback: u32, tip: &str) {
+    unsafe { Shell_NotifyIconW(0, &tray_data(hwnd, callback, tip)) }; // NIM_ADD
+}
+
+pub fn tray_remove(hwnd: HWND) {
+    unsafe { Shell_NotifyIconW(2, &tray_data(hwnd, 0, "")) }; // NIM_DELETE
+}
+
+/// Menu contextuel au niveau du curseur. Renvoie l'index de l'entrée choisie.
+/// Boucle modale : ne pas appeler pendant un emprunt de l'état de l'application.
+pub fn popup_menu(hwnd: HWND, items: &[&str]) -> Option<usize> {
+    unsafe {
+        let menu = CreatePopupMenu();
+        for (i, item) in items.iter().enumerate() {
+            AppendMenuW(menu, 0, i + 1, wide(item).as_ptr());
+        }
+        let mut pos = [0i32; 2];
+        GetCursorPos(&mut pos);
+        SetForegroundWindow(hwnd); // sans cela le menu ne se referme pas au clic ailleurs
+        let choice = TrackPopupMenu(menu, 0x0002 | 0x0100, pos[0], pos[1], 0, hwnd, null()); // RIGHTBUTTON | RETURNCMD
+        DestroyMenu(menu);
+        (choice > 0).then(|| choice as usize - 1)
+    }
+}
+
+pub fn show_window(hwnd: HWND, visible: bool) {
+    unsafe {
+        ShowWindow(hwnd, if visible { 5 } else { 0 });
+        if visible {
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+pub fn destroy_window(hwnd: HWND) {
+    unsafe { DestroyWindow(hwnd) };
+}
+
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Inscrit (ou retire) le lancement de `command` à l'ouverture de session de l'utilisateur.
+pub fn set_autostart(name: &str, command: Option<&str>) -> bool {
+    let hkcu = 0x8000_0001usize as HANDLE;
+    let status = unsafe {
+        match command {
+            Some(command) => {
+                let data = wide(command);
+                RegSetKeyValueW(
+                    hkcu,
+                    wide(RUN_KEY).as_ptr(),
+                    wide(name).as_ptr(),
+                    1, // REG_SZ
+                    data.as_ptr() as *const c_void,
+                    (data.len() * 2) as u32,
+                )
+            }
+            None => match RegDeleteKeyValueW(hkcu, wide(RUN_KEY).as_ptr(), wide(name).as_ptr()) {
+                2 => 0, // valeur déjà absente
+                other => other,
+            },
+        }
+    };
+    status == 0
 }

@@ -15,7 +15,7 @@ use omnictl::link::{Error, Link};
 use omnictl::proto::{self, Connection, Direction, Effect, Keyboard, Mode, Rgb, Speed};
 use omnictl::store;
 use std::cell::RefCell;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use win::{rc, Align, Canvas, Rc, HWND};
 
@@ -24,6 +24,10 @@ const H: f32 = 600.0;
 /// Marge latérale.
 const M: f32 = 28.0;
 const WM_UPDATE: u32 = win::WM_APP + 1;
+/// Clic sur l'icône de la zone de notification.
+const WM_TRAY: u32 = win::WM_APP + 2;
+/// Intervalle des rondes du gardien.
+const GUARD_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 const REFRESH_MS: u32 = 20_000;
 
 const PRESETS: [Rgb; 10] = [
@@ -93,6 +97,8 @@ enum Cmd {
     Saving(u8),
     Low(u8),
     Wdl(bool),
+    /// Active ou coupe le gardien dans le fil de travail.
+    Guard(bool),
 }
 
 /// Ce que l'interface affiche du clavier.
@@ -156,12 +162,12 @@ fn keyboard(slot: &mut Option<Keyboard>) -> Result<&mut Keyboard, Error> {
 
 /// Exécute une commande. Renvoie le message à afficher, s'il y en a un.
 fn execute(slot: &mut Option<Keyboard>, cmd: &Cmd) -> Result<Option<&'static str>, Error> {
-    if matches!(cmd, Cmd::Refresh) {
-        return Ok(None);
+    if matches!(cmd, Cmd::Refresh | Cmd::Guard(_)) {
+        return Ok(None); // rien à envoyer au clavier
     }
     let kb = keyboard(slot)?;
     Ok(match cmd {
-        Cmd::Refresh => None,
+        Cmd::Refresh | Cmd::Guard(_) => None,
         Cmd::Effect(e) => {
             kb.set_effect(e)?;
             None // appliqué en direct : pas de message à chaque retouche
@@ -239,15 +245,69 @@ fn snapshot(slot: &mut Option<Keyboard>) -> Result<Snapshot, Error> {
     })
 }
 
-fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize) {
+/// Le clavier répond-il en ce moment ? (Via le dongle, un clavier en veille est « injoignable ».)
+fn reachable(slot: &mut Option<Keyboard>) -> bool {
+    let ok = keyboard(slot)
+        .and_then(|kb| kb.status())
+        .is_ok_and(|st| st.connection != Connection::Unreachable);
+    if !ok {
+        *slot = None; // rouvrir au prochain essai
+    }
+    ok
+}
+
+fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize, mut guard: bool) {
     let mut kb: Option<Keyboard> = None;
-    while let Ok(first) = rx.recv() {
+    // Gardien : le clavier était-il joignable au dernier contrôle ? Faux au départ, pour que
+    // les couleurs soient posées dès le premier contact.
+    let mut was_reachable = false;
+    loop {
+        // Sans gardien, on dort jusqu'à la prochaine commande. Avec, on se réveille toutes
+        // les quelques secondes pour voir si le clavier vient de revenir.
+        let first = if guard {
+            match rx.recv_timeout(GUARD_POLL) {
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            match rx.recv() {
+                Ok(cmd) => Some(cmd),
+                Err(_) => return,
+            }
+        };
+        let Some(first) = first else {
+            // Simple ronde du gardien : rien à dire à l'interface si rien n'a changé.
+            let now = reachable(&mut kb);
+            if now && !was_reachable {
+                let leds = store::load();
+                let restored = !leds.is_empty() && keyboard(&mut kb).and_then(|k| k.set_direct(&leds)).is_ok();
+                if restored {
+                    if let Ok(mut s) = shared.lock() {
+                        (s.message, s.is_error) = ("Clavier réveillé : couleurs remises en place.".into(), false);
+                    }
+                }
+                // L'interface montre peut-être « clavier en veille » : lui faire relire l'état.
+                let snap = snapshot(&mut kb);
+                if let Ok(mut s) = shared.lock() {
+                    s.snap = snap.ok();
+                }
+                win::post(hwnd, WM_UPDATE);
+            }
+            was_reachable = now;
+            continue;
+        };
         let mut batch = vec![first];
         while let Ok(more) = rx.try_recv() {
             batch.push(more);
         }
         let mut message: Option<(String, bool)> = None;
         for cmd in coalesce(batch) {
+            if let Cmd::Guard(on) = cmd {
+                guard = on;
+                was_reachable = false; // à l'activation, poser les couleurs à la prochaine ronde
+                continue;
+            }
             match execute(&mut kb, &cmd) {
                 Ok(Some(text)) => message = Some((text.to_string(), false)),
                 Ok(None) => {}
@@ -270,6 +330,10 @@ fn worker(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, hwnd: usize) {
                 // Tout va bien de nouveau : effacer une ancienne erreur.
                 (Ok(_), None) if s.is_error => (s.message, s.is_error) = (String::new(), false),
                 (Ok(_), None) => {}
+            }
+            // Un clavier vu en veille ici doit déclencher le gardien à son retour.
+            if snap.is_err() {
+                was_reachable = false;
             }
             s.snap = snap.ok();
         }
@@ -305,6 +369,9 @@ enum Hit {
     Fill,
     Clear,
     Reapply,
+    Guard,
+    /// Couleur du châssis dans la vue : `true` = clavier blanc.
+    Chassis(bool),
     Profile(u8),
     Sleep(u8),
     Saving(u8),
@@ -505,6 +572,10 @@ struct App {
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
+    /// Gardien actif : la fenêtre se replie dans la zone de notification au lieu de se fermer.
+    guard: bool,
+    /// Le clavier de l'utilisateur est la version blanche.
+    white: bool,
     hits: Vec<(Rc, Hit)>,
     hover: Option<Hit>,
     drag: Option<Hit>,
@@ -603,8 +674,26 @@ impl App {
         }
     }
 
-    fn push_effect(&self) {
+    fn push_effect(&mut self) {
+        // Un effet remplace les couleurs touche par touche : sans cela, le gardien les
+        // reposerait par-dessus au prochain réveil du clavier.
+        if self.guard {
+            self.set_guard(false);
+        }
         self.send(Cmd::Effect(self.fx.clone()));
+    }
+
+    fn set_guard(&mut self, on: bool) {
+        self.guard = on;
+        let _ = store::set_guard(on);
+        let command = std::env::current_exe().ok().map(|exe| format!("\"{}\" --background", exe.display()));
+        win::set_autostart("omnictl", if on { command.as_deref() } else { None });
+        if on {
+            win::tray_add(self.hwnd, WM_TRAY, "omnictl — gardien des couleurs du clavier");
+        } else {
+            win::tray_remove(self.hwnd);
+        }
+        self.send(Cmd::Guard(on));
     }
 
     fn set_key(&mut self, id: u8, color: Rgb) -> bool {
@@ -756,12 +845,22 @@ impl App {
                 self.fx.direction = direction;
                 self.push_effect();
             }
-            Hit::SaveEffect => self.send(Cmd::SaveEffect(self.fx.clone())),
+            Hit::SaveEffect => {
+                if self.guard {
+                    self.set_guard(false);
+                }
+                self.send(Cmd::SaveEffect(self.fx.clone()));
+            }
             Hit::Preset(i) => self.brush = PRESETS[i],
             Hit::CustomBrush => self.picker = Some(Picker::new(PickTarget::Brush, self.custom_brush)),
             Hit::Fill => self.paint_all(self.brush),
             Hit::Clear => self.paint_all(Rgb::BLACK),
             Hit::Reapply => self.send(Cmd::ApplyKeys),
+            Hit::Guard => self.set_guard(!self.guard),
+            Hit::Chassis(white) => {
+                self.white = white;
+                let _ = store::set_flag("white", white);
+            }
             Hit::Profile(n) => self.send(Cmd::Profile(n)),
             Hit::Sleep(i) => self.send(Cmd::Sleep(i)),
             Hit::Saving(m) => self.send(Cmd::Saving(m)),
@@ -849,7 +948,7 @@ impl App {
     fn draw_picker(&self, ui: &mut Ui) {
         let Some(p) = &self.picker else { return };
         let t = self.theme;
-        ui.c.bar(rc(0.0, 0.0, W, H), 0x8C000000);
+        ui.c.bar(rc(-4000.0, -4000.0, 8000.0 + W, 8000.0 + H), 0x8C000000);
         let (px, py) = ((W - 320.0) / 2.0, (H - 404.0) / 2.0);
         let panel = rc(px, py, 320.0, 404.0);
         ui.c.fill(panel, 14.0, t.surface);
@@ -925,7 +1024,8 @@ impl App {
             ui.hit(rc(x - 8.0, 66.0, w + 16.0, 40.0), Hit::Tab(tab));
             x += w + 30.0;
         }
-        ui.c.bar(rc(0.0, 104.5, W, 1.0), t.border);
+        // Largement plus long que le contenu : la fenêtre peut être plus large que lui.
+        ui.c.bar(rc(-4000.0, 104.5, 8000.0 + W, 1.0), t.border);
     }
 
     fn draw_light(&self, ui: &mut Ui) {
@@ -1018,21 +1118,31 @@ impl App {
         // Clavier dessiné d'après le vrai : châssis sombre, capuchons noirs, et la couleur de
         // chaque LED qui déborde sous sa touche et éclaire sa légende. Positions en quarts de
         // touche, 10 px le quart.
+        ui.label("CLAVIER", W - M - 150.0, y0);
+        ui.segmented(rc(W - M - 150.0, y0 + 22.0, 150.0, 34.0), &["Noir", "Blanc"], Some(self.white as usize), |i| {
+            Hit::Chassis(i == 1)
+        });
+        // Teintes du châssis, d'une touche éteinte, de sa légende, des voyants et de la molette.
+        let (body, edge, cap_off, legend_off, dot, knob_fill, knob_edge) = if self.white {
+            (0xFFE7E9EC, 0xFFC6CAD1, 0xFFF8F8F9, 0xFF9AA1AC, 0xFFC3C7CE, 0xFFD5D8DD, 0xFFB4B9C1)
+        } else {
+            (0xFF0B0C0F, 0xFF2B2E35, 0xFF1C1E23, 0xFF5C6370, 0xFF30343C, 0xFF1D2025, 0xFF353941)
+        };
         let u = 10.0;
         let chassis = rc(M, y0 + 76.0, 78.0 * u + 24.0, 24.0 * u + 24.0);
-        ui.c.fill(chassis, 16.0, 0xFF0B0C0F);
-        ui.c.stroke(chassis, 16.0, 0xFF2B2E35, 1.0);
+        ui.c.fill(chassis, 16.0, body);
+        ui.c.stroke(chassis, 16.0, edge, 1.0);
         let (ox, oy) = (chassis.x + 12.0, chassis.y + 12.0);
         // Colonne de voyants entre le bloc principal et le pavé numérique.
         for i in 0..5 {
-            ui.c.fill(rc(ox + 60.6 * u, oy + (9.6 + i as f32 * 1.5) * u, 0.8 * u, 0.8 * u), 0.4 * u, 0xFF30343C);
+            ui.c.fill(rc(ox + 60.6 * u, oy + (9.6 + i as f32 * 1.5) * u, 0.8 * u, 0.8 * u), 0.4 * u, dot);
         }
         // Molette, en haut à droite (décor : elle n'a pas de LED).
         let knob = rc(ox + 75.4 * u, oy + 0.3 * u, 2.5 * u, 3.4 * u);
-        ui.c.fill(knob, 5.0, 0xFF1D2025);
-        ui.c.stroke(knob, 5.0, 0xFF353941, 1.0);
+        ui.c.fill(knob, 5.0, knob_fill);
+        ui.c.stroke(knob, 5.0, knob_edge, 1.0);
         for i in 0..4 {
-            ui.c.bar(rc(knob.x + 5.0 + i as f32 * 5.0, knob.y + 5.0, 1.0, knob.h - 10.0), 0xFF3F444D);
+            ui.c.bar(rc(knob.x + 5.0 + i as f32 * 5.0, knob.y + 5.0, 1.0, knob.h - 10.0), knob_edge);
         }
 
         for key in keys::KEYS {
@@ -1049,18 +1159,30 @@ impl App {
                 .filter(|c| *c != Rgb::BLACK);
             let cap = rc(r.x + 2.5, r.y + 2.5, r.w - 5.0, r.h - 5.0);
             let legend_color = match lit {
+                Some(c) if self.white => {
+                    // Sur un clavier blanc, une LED faible ne noircit pas la touche : elle la
+                    // teinte à peine. On sépare donc la teinte (pleine) de l'intensité.
+                    let v = c.0.max(c.1).max(c.2) as f32 / 255.0;
+                    let hue = Rgb((c.0 as f32 / v) as u8, (c.1 as f32 / v) as u8, (c.2 as f32 / v) as u8);
+                    ui.c.fill(r, 6.0, argb(mix(Rgb(205, 208, 214), hue, v)));
+                    ui.c.fill(cap, 4.0, argb(mix(Rgb(248, 248, 249), hue, 0.25 * v)));
+                    argb(mix(Rgb(120, 126, 136), mix(hue, Rgb(0, 0, 0), 0.35), v))
+                }
                 Some(c) => {
                     ui.c.fill(r, 6.0, argb(c));
                     ui.c.fill(cap, 4.0, argb(mix(Rgb(20, 22, 26), c, 0.28)));
                     argb(mix(c, Rgb(255, 255, 255), 0.45))
                 }
                 None => {
-                    ui.c.fill(r, 6.0, 0xFF1C1E23);
-                    0xFF5C6370
+                    ui.c.fill(r, 6.0, cap_off);
+                    if self.white {
+                        ui.c.stroke(r, 6.0, edge, 1.0);
+                    }
+                    legend_off
                 }
             };
             if ui.hover == Some(Hit::Key(key.id)) {
-                ui.c.stroke(r, 6.0, 0xFFFFFFFF, 1.5);
+                ui.c.stroke(r, 6.0, if self.white { 0xFF000000 } else { 0xFFFFFFFF }, 1.5);
             }
             let legend = self
                 .legends
@@ -1084,22 +1206,14 @@ impl App {
         ui.chip(rc(M, by, 132.0, 36.0), "Tout remplir", false, Hit::Fill);
         ui.chip(rc(M + 144.0, by, 132.0, 36.0), "Tout éteindre", false, Hit::Clear);
         ui.chip(rc(M + 288.0, by, 132.0, 36.0), "Réappliquer", false, Hit::Reapply);
-        ui.c.text(
-            "Cliquez ou glissez sur les touches pour les colorer.",
-            rc(M + 440.0, by - 4.0, W - 2.0 * M - 440.0, 22.0),
-            12.0,
-            false,
-            t.dim,
-            Align::Left,
-        );
-        ui.c.text(
-            "Couleurs perdues en veille : « Réappliquer » les remet.",
-            rc(M + 440.0, by + 16.0, W - 2.0 * M - 440.0, 22.0),
-            12.0,
-            false,
-            t.dim,
-            Align::Left,
-        );
+        ui.toggle(M + 452.0, by + 5.0, self.guard, Hit::Guard);
+        ui.c.text("Garder ces couleurs", rc(M + 510.0, by - 3.0, 290.0, 22.0), 13.0, true, t.text, Align::Left);
+        let note = if self.guard {
+            "omnictl veille en arrière-plan, dès l'ouverture de session."
+        } else {
+            "Sinon le clavier les perd à chaque mise en veille."
+        };
+        ui.c.text(note, rc(M + 510.0, by + 17.0, 294.0, 22.0), 12.0, false, t.dim, Align::Left);
     }
 
     fn draw_settings(&self, ui: &mut Ui) {
@@ -1168,7 +1282,7 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
         win::WM_PAINT => {
-            let painted = with_app(|a| win::paint(hwnd, |c| a.draw(c)));
+            let painted = with_app(|a| win::paint(hwnd, W, H, |c| a.draw(c)));
             if painted.is_none() {
                 return win::DefWindowProcW(hwnd, msg, wparam, lparam); // valide la zone à peindre
             }
@@ -1176,12 +1290,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
         }
         win::WM_ERASEBKGND => 1,
         win::WM_LBUTTONDOWN => {
-            let (x, y) = win::mouse_pos(hwnd, lparam);
+            let (x, y) = win::mouse_pos(hwnd, lparam, W, H);
             with_app(|a| a.mouse_down(x, y));
             0
         }
         win::WM_MOUSEMOVE => {
-            let (x, y) = win::mouse_pos(hwnd, lparam);
+            let (x, y) = win::mouse_pos(hwnd, lparam, W, H);
             with_app(|a| a.mouse_move(x, y));
             0
         }
@@ -1197,12 +1311,49 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
             with_app(|a| a.sync());
             0
         }
+        win::WM_SIZE => {
+            win::redraw(hwnd);
+            0
+        }
+        win::WM_SETTINGCHANGE => {
+            // Windows vient peut-être de passer du thème clair au sombre, ou l'inverse.
+            let dark = win::dark_mode();
+            with_app(|a| a.theme = if dark { &DARK } else { &LIGHT });
+            win::set_title_dark(hwnd, dark);
+            win::redraw(hwnd);
+            win::DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         win::WM_DPICHANGED => {
             win::apply_suggested_rect(hwnd, lparam);
             win::redraw(hwnd);
             0
         }
+        win::WM_CLOSE => {
+            // Gardien actif : fermer la fenêtre la replie dans la zone de notification.
+            if with_app(|a| a.guard) == Some(true) {
+                win::show_window(hwnd, false);
+            } else {
+                win::destroy_window(hwnd);
+            }
+            0
+        }
+        WM_TRAY => {
+            match lparam as u32 {
+                win::WM_LBUTTONUP => win::show_window(hwnd, true),
+                win::WM_RBUTTONUP => {
+                    // Menu modal : appelé hors de tout emprunt de l'état.
+                    match win::popup_menu(hwnd, &["Ouvrir omnictl", "Quitter"]) {
+                        Some(0) => win::show_window(hwnd, true),
+                        Some(1) => win::destroy_window(hwnd),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            0
+        }
         win::WM_DESTROY => {
+            win::tray_remove(hwnd);
             win::PostQuitMessage(0);
             0
         }
@@ -1213,7 +1364,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
 fn main() {
     win::init();
     let dark = win::dark_mode();
-    let hwnd = win::create_window("omnictl", W, H, dark, wndproc);
+    let guard = store::guard();
+    // `--background` : lancé à l'ouverture de session par le gardien, sans montrer la fenêtre.
+    let background = std::env::args().any(|a| a == "--background");
+    // Ouverture un quart plus grand que la maquette ; la fenêtre s'agrandit ensuite à volonté.
+    let hwnd = win::create_window("omnictl", W * 1.25, H * 1.25, dark, !(background && guard), wndproc);
     if hwnd.is_null() {
         win::error_box("Impossible de créer la fenêtre.");
         return;
@@ -1223,7 +1378,10 @@ fn main() {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let worker_shared = Arc::clone(&shared);
     let hwnd_bits = hwnd as usize;
-    std::thread::spawn(move || worker(rx, worker_shared, hwnd_bits));
+    std::thread::spawn(move || worker(rx, worker_shared, hwnd_bits, guard));
+    if guard {
+        win::tray_add(hwnd, WM_TRAY, "omnictl — gardien des couleurs du clavier");
+    }
 
     let app = App {
         hwnd,
@@ -1250,6 +1408,8 @@ fn main() {
         key_colors: store::load(),
         legends: keys::layout_legends(),
         low_edit: None,
+        guard,
+        white: store::flag("white"),
         hits: Vec::new(),
         hover: None,
         drag: None,
