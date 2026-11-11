@@ -899,7 +899,7 @@ impl App {
         ui.chip(rc(M + 144.0, by, 132.0, 36.0), "Tout éteindre", false, Hit::Clear);
         ui.chip(rc(M + 288.0, by, 132.0, 36.0), "Réappliquer", false, Hit::Reapply);
         ui.c.text(
-            "Cliquez ou glissez sur les touches. Ces couleurs sont tenues par l'ordinateur :",
+            "Cliquez ou glissez sur les touches pour les colorer.",
             rc(M + 440.0, by - 4.0, W - 2.0 * M - 440.0, 22.0),
             12.0,
             false,
@@ -907,7 +907,7 @@ impl App {
             Align::Left,
         );
         ui.c.text(
-            "le clavier les perd en veille ; « Réappliquer » les remet.",
+            "Couleurs perdues en veille : « Réappliquer » les remet.",
             rc(M + 440.0, by + 16.0, W - 2.0 * M - 440.0, 22.0),
             12.0,
             false,
@@ -961,7 +961,10 @@ impl App {
 
         name(ui, 5, "Molette");
         let lever = s.and_then(|s| proto::LEVER_CHOICES.get(s.lever as usize)).copied().unwrap_or("—");
-        ui.c.text(lever, rc(cx, row(5), cw, 36.0), 14.0, false, t.dim, Align::Left);
+        // Majuscule initiale pour l'affichage (les libellés servent aussi en milieu de phrase).
+        let mut chars = lever.chars();
+        let lever: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+        ui.c.text(&lever, rc(cx, row(5), cw, 36.0), 14.0, false, t.dim, Align::Left);
     }
 }
 
