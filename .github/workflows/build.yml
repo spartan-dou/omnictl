@@ -48,12 +48,38 @@ jobs:
           Get-ChildItem dist | Select-Object Name, Length
           Get-Content dist/SHA256SUMS.txt
 
+      # Installeur MSI (Program Files, pour tout le PC), compilé avec WiX Toolset.
+      - name: Paquets MSI
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          dotnet tool install --global wix --version 5.0.2
+          foreach ($arch in 'x64', 'arm64') {
+            wix build packaging/omnictl.wxs -arch $arch -d Version=$version -d Arch=$arch -d Dist=dist -o dist/omnictl-$arch.msi
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      # Version portable : un zip, rien à installer, réglages à côté de l'exécutable.
+      - name: Versions portables
+        shell: pwsh
+        run: |
+          foreach ($arch in 'x64', 'arm64') {
+            $dir = "portable-$arch"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            Copy-Item dist/omnictl-gui-$arch.exe $dir/omnictl-gui.exe
+            Copy-Item dist/omnictl-$arch.exe $dir/omnictl.exe
+            Copy-Item packaging/portable.txt $dir/
+            Compress-Archive -Path "$dir/*" -DestinationPath dist/omnictl-portable-$arch.zip
+          }
+          Get-ChildItem dist | Select-Object Name, Length
+
       - uses: actions/upload-artifact@v4
         with:
           name: omnictl-windows
           path: |
             dist/*.exe
-            dist/SHA256SUMS.txt
+            dist/*.msi
+            dist/*.zip
           if-no-files-found: error
 
   # Chaque architecture Linux compile sur une machine de son architecture : rien à installer.

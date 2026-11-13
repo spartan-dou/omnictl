@@ -76,21 +76,48 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+fn sums() -> Result<String, String> {
+    fetch("SHA256SUMS.txt")
+        .and_then(|d| String::from_utf8(d).ok())
+        .ok_or_else(|| "téléchargement des empreintes impossible".to_string())
+}
+
+/// Télécharge `asset` et vérifie son empreinte contre la liste publiée.
+fn fetch_verified(sums: &str, asset: &str) -> Result<Vec<u8>, String> {
+    let data = fetch(asset).ok_or(format!("téléchargement de {asset} impossible"))?;
+    let expected = expected_hash(sums, asset).ok_or(format!("empreinte de {asset} absente"))?;
+    let actual = win::sha256(&data).map(|h| hex(&h)).ok_or("calcul d'empreinte impossible")?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!("{asset} : empreinte inattendue, mise à jour abandonnée"));
+    }
+    Ok(data)
+}
+
+/// Installation faite par le paquet MSI : télécharge et vérifie le MSI de la dernière
+/// version, puis le lance (Windows demande l'accord d'un administrateur). L'application
+/// doit se fermer aussitôt pour que ses fichiers puissent être remplacés.
+pub fn install_msi() -> Result<(), String> {
+    let asset = format!("omnictl-{ARCH}.msi");
+    let data = fetch_verified(&sums()?, &asset)?;
+    let path = std::env::temp_dir().join(&asset);
+    std::fs::write(&path, data).map_err(|e| format!("écriture impossible : {e}"))?;
+    std::process::Command::new("msiexec")
+        .arg("/i")
+        .arg(&path)
+        .arg("/passive")
+        .spawn()
+        .map_err(|e| format!("lancement de l'installeur impossible : {e}"))?;
+    Ok(())
+}
+
 /// Télécharge, vérifie puis met en place la dernière version. À la réussite, il reste à
 /// relancer l'application.
 pub fn install() -> Result<(), String> {
-    let sums = fetch("SHA256SUMS.txt")
-        .and_then(|d| String::from_utf8(d).ok())
-        .ok_or("téléchargement des empreintes impossible")?;
+    let sums = sums()?;
     let targets = targets()?;
     // Tout télécharger et vérifier avant de toucher au moindre fichier en place.
     for (asset, path) in &targets {
-        let data = fetch(asset).ok_or(format!("téléchargement de {asset} impossible"))?;
-        let expected = expected_hash(&sums, asset).ok_or(format!("empreinte de {asset} absente"))?;
-        let actual = win::sha256(&data).map(|h| hex(&h)).ok_or("calcul d'empreinte impossible")?;
-        if !actual.eq_ignore_ascii_case(expected) {
-            return Err(format!("{asset} : empreinte inattendue, mise à jour abandonnée"));
-        }
+        let data = fetch_verified(&sums, asset)?;
         std::fs::write(sibling(path, ".new"), data).map_err(|e| format!("écriture impossible : {e}"))?;
     }
     for (_, path) in &targets {

@@ -9,7 +9,21 @@ use crate::keyfx::{Gradient, KeyFx, KeyStyle};
 use crate::proto::Rgb;
 use std::path::PathBuf;
 
+/// Nom du fichier qui, posé à côté de l'exécutable, rend l'application portable.
+pub const PORTABLE_MARKER: &str = "portable.txt";
+
+/// Dossier des réglages en mode portable : `settings` à côté de l'exécutable, quand le
+/// fichier [`PORTABLE_MARKER`] s'y trouve. Rien n'est alors écrit dans le profil.
+pub fn portable_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("settings"))
+}
+
 pub fn path() -> Option<PathBuf> {
+    if let Some(dir) = portable_dir() {
+        return Some(dir.join("keys.txt"));
+    }
     // Windows : %APPDATA%. Ailleurs : $XDG_CONFIG_HOME, ou ~/.config à défaut.
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)

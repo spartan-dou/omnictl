@@ -1,0 +1,3 @@
+omnictl a ete installe par son paquet MSI.
+Ses mises a jour passent par un nouveau MSI (droits administrateur).
+Ne pas supprimer ce fichier.

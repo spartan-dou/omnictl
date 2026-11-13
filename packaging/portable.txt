@@ -1,0 +1,7 @@
+Version portable d'omnictl.
+
+Tant que ce fichier est a cote de omnictl-gui.exe, l'application n'installe rien et
+garde ses reglages dans le dossier "settings" ici meme : le dossier peut vivre sur une
+cle USB ou dans un dossier synchronise, et passer d'un PC a l'autre avec les couleurs.
+
+Supprimer ce fichier rend l'application "normale" (reglages dans %APPDATA%\omnictl).

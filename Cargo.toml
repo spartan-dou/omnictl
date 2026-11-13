@@ -1,11 +1,11 @@
 [package]
 name = "omnictl"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "Contrôleur léger et libre pour les périphériques ASUS ROG (clavier Strix Scope II 96 Wireless, dongle Omni)"
+description = "Contr??leur l??ger et libre pour les p??riph??riques ASUS ROG (clavier Strix Scope II 96 Wireless, dongle Omni)"
 license = "GPL-2.0-or-later"
 
-# Aucune dépendance : bibliothèque standard + appels directs à l'API HID de Windows.
+# Aucune d??pendance : biblioth??que standard + appels directs ?? l'API HID de Windows.
 [dependencies]
 
 [profile.release]

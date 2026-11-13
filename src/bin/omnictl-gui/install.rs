@@ -23,6 +23,35 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     a.to_string_lossy().trim_end_matches('\\').eq_ignore_ascii_case(b.to_string_lossy().trim_end_matches('\\'))
 }
 
+/// Fichier posé par le paquet MSI à côté de l'exécutable.
+const MSI_MARKER: &str = "msi.txt";
+
+/// Comment cette copie de l'application a été mise en place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Exécutable lancé d'un dossier quelconque (Téléchargements…) : on propose d'installer.
+    Loose,
+    /// Version portable : réglages à côté de l'exécutable, rien d'écrit sur le PC.
+    Portable,
+    /// Installée pour l'utilisateur par l'application elle-même.
+    User,
+    /// Installée par le paquet MSI (Program Files) : les mises à jour passent par un MSI.
+    Msi,
+}
+
+pub fn kind() -> Kind {
+    let here = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+    if omnictl::store::portable_dir().is_some() {
+        Kind::Portable
+    } else if here.as_deref().is_some_and(|d| d.join(MSI_MARKER).is_file()) {
+        Kind::Msi
+    } else if is_installed() {
+        Kind::User
+    } else {
+        Kind::Loose
+    }
+}
+
 /// L'application tourne-t-elle depuis son dossier d'installation ?
 pub fn is_installed() -> bool {
     let exe = std::env::current_exe().ok();

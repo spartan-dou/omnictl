@@ -1167,8 +1167,8 @@ struct App {
     /// Version plus récente disponible, et installation en cours.
     update: Option<String>,
     updating: bool,
-    /// L'application tourne depuis son dossier d'installation.
-    installed: bool,
+    /// Comment cette copie a été mise en place (portable, installée, MSI…).
+    kind: install::Kind,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1604,8 +1604,10 @@ impl App {
                     self.is_error = false;
                     // Hors du fil de l'interface : le téléchargement peut prendre du temps.
                     let (shared, hwnd) = (Arc::clone(&self.shared), self.hwnd as usize);
-                    std::thread::spawn(move || match update::install() {
-                        Ok(()) => win::post(hwnd, WM_RESTART),
+                    let msi = self.kind == install::Kind::Msi;
+                    std::thread::spawn(move || match if msi { update::install_msi() } else { update::install() } {
+                        // Le MSI remplace les fichiers lui-même : il faut simplement se fermer.
+                        Ok(()) => win::post(hwnd, if msi { WM_QUIT_APP } else { WM_RESTART }),
                         Err(e) => {
                             if let Ok(mut s) = shared.lock() {
                                 (s.message, s.is_error) = (format!("Mise à jour impossible : {e}"), true);
@@ -1770,7 +1772,7 @@ impl App {
             let label = if self.updating { "Mise à jour en cours…".to_string() } else { format!("Installer la version {version}") };
             ui.button(rc(12.0, H - 80.0, NAV - 24.0, 34.0), &label, true, Hit::Update);
         }
-        if !self.installed {
+        if self.kind == install::Kind::Loose {
             let y = if self.update.is_some() { H - 122.0 } else { H - 80.0 };
             ui.button(rc(12.0, y, NAV - 24.0, 34.0), "Installer sur ce PC", false, Hit::Install);
         }
@@ -2452,7 +2454,7 @@ pub fn main() {
         start: Instant::now(),
         update: None,
         updating: false,
-        installed: install::is_installed(),
+        kind: install::kind(),
         apps: store::list_apps(),
         own_exe: std::env::current_exe()
             .ok()

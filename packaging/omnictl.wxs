@@ -1,0 +1,42 @@
+<!--
+  Paquet MSI d'omnictl, compilé par la CI avec WiX Toolset (libre) :
+    wix build packaging/omnictl.wxs -arch x64 -d Version=0.5.0 -d Arch=x64 -d Dist=dist -o omnictl-x64.msi
+
+  Installation pour tout le PC dans Program Files (droits administrateur), raccourci dans le
+  menu Démarrer, désinstallation depuis Paramètres > Applications. C'est le format que les
+  services informatiques savent déployer (Intune, GPO…). Le fichier msi.txt indique à
+  l'application que ses mises à jour doivent passer par un nouveau MSI.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="omnictl"
+           Manufacturer="omnictl"
+           Version="$(var.Version)"
+           UpgradeCode="70bca0d7-a286-46f3-847e-dae836bc4960"
+           Scope="perMachine">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of omnictl is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="omnictl.ico" SourceFile="assets\omnictl.ico" />
+    <Property Id="ARPPRODUCTICON" Value="omnictl.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/spartan-dou/omnictl" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="omnictl">
+        <Component Id="Gui">
+          <File Id="GuiExe" Source="$(var.Dist)\omnictl-gui-$(var.Arch).exe" Name="omnictl-gui.exe" KeyPath="yes">
+            <Shortcut Id="StartMenu" Name="omnictl" Directory="ProgramMenuFolder"
+                      Description="ROG keyboard and mouse lighting and settings"
+                      WorkingDirectory="INSTALLFOLDER" Icon="omnictl.ico" Advertise="yes" />
+          </File>
+        </Component>
+        <Component Id="Cli">
+          <File Id="CliExe" Source="$(var.Dist)\omnictl-$(var.Arch).exe" Name="omnictl.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Marker">
+          <File Id="MsiMarker" Source="packaging\msi.txt" Name="msi.txt" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+  </Package>
+</Wix>

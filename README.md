@@ -19,14 +19,28 @@ Les exécutables sont sur la page [Releases](../../releases) :
 
 | Fichier | Rôle |
 |---|---|
-| `omnictl-gui-x64.exe` / `omnictl-gui-arm64.exe` | interface graphique |
+| `omnictl-portable-x64.zip` / `-arm64.zip` | **version portable** : à dézipper, rien à installer |
+| `omnictl-x64.msi` / `omnictl-arm64.msi` | **installeur MSI** pour tout le PC (droits administrateur) |
+| `omnictl-gui-x64.exe` / `omnictl-gui-arm64.exe` | interface graphique seule |
 | `omnictl-x64.exe` / `omnictl-arm64.exe` | ligne de commande et serveur MCP |
 | `omnictl-linux-x64` / `omnictl-linux-arm64` | ligne de commande et serveur MCP pour Linux |
 | `60-omnictl.rules` | règle udev donnant accès aux périphériques sous Linux |
 
 Les exécutables Windows ne sont pas signés : voir [Smart App Control](#smart-app-control).
 
-**Installation** : lancez `omnictl-gui-x64.exe` (ou `-arm64`), puis « Installer sur ce PC » en bas
+Trois façons de l'utiliser :
+
+**Portable** (PC professionnel, clé USB) : dézippez `omnictl-portable-x64.zip` où vous voulez et
+lancez `omnictl-gui.exe`. Le fichier `portable.txt` à côté indique à l'application de ne rien
+écrire sur le PC : ses réglages vont dans le dossier `settings` voisin. Le dossier entier peut
+donc passer d'un PC à l'autre avec vos couleurs. Les mises à jour remplacent les fichiers sur place.
+
+**MSI** : `omnictl-x64.msi` installe dans `Program Files` pour tous les utilisateurs, avec raccourci
+dans le menu Démarrer et désinstallation depuis Paramètres → Applications. C'est le format que
+les services informatiques savent déployer. Une mise à jour proposée par l'application télécharge
+le nouveau MSI, vérifie son empreinte et le lance (Windows demande alors l'accord d'un administrateur).
+
+**Installation par l'application** : lancez `omnictl-gui-x64.exe` (ou `-arm64`), puis « Installer sur ce PC » en bas
 à gauche. Aucun droit administrateur : l'application se copie dans
 `%LOCALAPPDATA%\Programs\omnictl`, ajoute un raccourci au menu Démarrer et apparaît dans
 « Applications installées », d'où elle se désinstalle. Vos réglages (`%APPDATA%\omnictl`) sont
