@@ -758,6 +758,13 @@ pub fn tray_add(hwnd: HWND, callback: u32, tip: &str) {
     unsafe { Shell_NotifyIconW(0, &tray_data(hwnd, callback, tip)) }; // NIM_ADD
 }
 
+/// Change le texte affiché au survol de l'icône (une ligne par `\n`, 127 caractères au plus).
+pub fn tray_tip(hwnd: HWND, tip: &str) {
+    let mut data = tray_data(hwnd, 0, tip);
+    data.uFlags = 0x4; // TIP seulement
+    unsafe { Shell_NotifyIconW(1, &data) }; // NIM_MODIFY
+}
+
 pub fn tray_remove(hwnd: HWND) {
     unsafe { Shell_NotifyIconW(2, &tray_data(hwnd, 0, "")) }; // NIM_DELETE
 }

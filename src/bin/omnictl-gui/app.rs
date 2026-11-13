@@ -72,6 +72,21 @@ fn load_idle() -> u32 {
 
 const TRAY_TIP: &str = "omnictl";
 
+/// Info-bulle de l'icône de notification : une ligne par appareil joignable.
+fn tray_text(keyboard: Option<(u8, bool)>, mouse: Option<u8>) -> String {
+    let mut text = TRAY_TIP.to_string();
+    if let Some((percent, charging)) = keyboard {
+        text.push_str(&format!("\nClavier : {percent} %{}", if charging { " (en charge)" } else { "" }));
+    }
+    if let Some(percent) = mouse {
+        text.push_str(&format!("\nSouris : {percent} %"));
+    }
+    if keyboard.is_none() && mouse.is_none() {
+        text.push_str("\nAucun appareil joignable");
+    }
+    text
+}
+
 const PRESETS: [Rgb; 10] = [
     Rgb(255, 0, 0),
     Rgb(255, 96, 0),
@@ -1172,6 +1187,8 @@ struct App {
     updating: bool,
     /// Comment cette copie a été mise en place (portable, installée, MSI…).
     kind: install::Kind,
+    /// Texte affiché au survol de l'icône de notification.
+    tray_tip: String,
     legends: Vec<(u8, char)>,
     /// Valeur du curseur « alerte batterie » pendant qu'on le déplace.
     low_edit: Option<u8>,
@@ -1382,6 +1399,12 @@ impl App {
             self.update = s.update.clone();
             self.message = s.message.clone();
             self.is_error = s.is_error;
+        }
+        // Info-bulle de l'icône près de l'horloge : batterie des appareils joignables.
+        let tip = tray_text(self.snap.as_ref().map(|s| (s.percent, s.charging)), self.mouse.as_ref().map(|m| m.percent));
+        if tip != self.tray_tip {
+            win::tray_tip(self.hwnd, &tip);
+            self.tray_tip = tip;
         }
         // Au premier contact, refléter les réglages en cours, sans rien envoyer.
         if !self.synced {
@@ -2400,11 +2423,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: usize, lparam: i
 }
 
 pub fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |name: &str| args.iter().any(|a| a == name);
+    // `omnictl-gui.exe mcp` : serveur MCP sur stdin/stdout, sans fenêtre, à côté de
+    // l'interface éventuellement ouverte. Un seul exécutable suffit alors pour tout.
+    if has("mcp") || has("--mcp") {
+        let _ = omnictl::mcp::run();
+        return;
+    }
     win::init();
     let dark = win::dark_mode();
     let guard = store::guard();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let has = |name: &str| args.iter().any(|a| a == name);
     if has("--after-update") {
         // Laisser à l'ancienne version le temps de se fermer et de libérer son verrou.
         std::thread::sleep(Duration::from_millis(1500));
@@ -2489,6 +2518,7 @@ pub fn main() {
         update: None,
         updating: false,
         kind: install::kind(),
+        tray_tip: TRAY_TIP.to_string(),
         apps: store::list_apps(),
         own_exe: std::env::current_exe()
             .ok()

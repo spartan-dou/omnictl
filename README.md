@@ -53,7 +53,8 @@ et relance l'application. Rien n'est installé sans ce clic.
 ## Interface graphique
 
 Un volet par appareil (clavier, souris), avec sa batterie. L'application garde une icône près
-de l'horloge (clic pour la rouvrir, clic droit pour quitter) et ne s'ouvre qu'en un exemplaire.
+de l'horloge (clic pour la rouvrir, clic droit pour quitter ; au survol, la batterie du clavier
+et de la souris) et ne s'ouvre qu'en un exemplaire.
 
 **Clavier**
 
@@ -107,7 +108,16 @@ entrée/sortie standard ; aucun port réseau n'est ouvert. Outils exposés : `ke
 `set_effect`, `set_key_colors`, `apply_saved_keys`, `list_keys`, `set_power`, `set_profile`,
 `set_dynamic_lighting`.
 
-Claude Code :
+L'interface graphique contient le même serveur : `omnictl-gui.exe mcp` fonctionne aussi, sans
+ouvrir de fenêtre et même si l'interface est déjà ouverte. Une installation (par l'application,
+le MSI ou la version portable) n'a donc besoin que d'un seul exécutable. Exemple avec la copie
+installée par l'application :
+
+```
+claude mcp add omnictl -- %LOCALAPPDATA%\Programs\omnictl\omnictl-gui.exe mcp
+```
+
+Ou avec la ligne de commande :
 
 ```
 claude mcp add omnictl -- C:\chemin\vers\omnictl-x64.exe mcp
@@ -175,8 +185,7 @@ Les exécutables sont produits dans `dist\`.
 
 ### Smart App Control
 
-La signature gratuite par la SignPath Foundation est en préparation (voir
-[CODE_SIGNING.md](CODE_SIGNING.md)) ; en attendant, les exécutables ne sont pas signés. Sur une machine où Smart App Control est actif, Windows
+Les exécutables ne sont pas signés. Sur une machine où Smart App Control est actif, Windows
 peut refuser de les lancer, et son verdict varie d'une compilation à l'autre. Il n'existe
 pas d'exception par application : il faut soit le désactiver (réglage définitif, Defender
 et SmartScreen restent actifs), soit signer les exécutables.
