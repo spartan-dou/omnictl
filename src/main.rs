@@ -17,6 +17,8 @@ COMMANDES
   keys <touche>=<couleur>...   couleurs touche par touche (tenues par l'ordinateur)
   apply                        remet en place les dernières couleurs touche par touche
   list                         liste les noms de touches et de groupes
+  export <fichier>             exporte toute la configuration (touches, applications…)
+  import <fichier>             remplace la configuration par un export
   profile <0-6>                bascule sur un profil embarqué (0 = par défaut)
   sleep <1|2|3|5|10|never>     délai de mise en veille, en minutes
   saving <off|lights-off|dim>  économie d'énergie sur batterie
@@ -297,6 +299,25 @@ fn run() -> Result<(), Error> {
         "save" => {
             args.allow(&[])?;
             open(&args)?.save()?;
+        }
+        "export" => {
+            args.allow(&[])?;
+            let file = one(rest, "export <fichier>")?;
+            let text = store::export_config().or_else(msg)?;
+            if let Err(e) = std::fs::write(file, text) {
+                return msg(format!("{file} : {e}"));
+            }
+            println!("configuration exportée dans {file}");
+        }
+        "import" => {
+            args.allow(&[])?;
+            let file = one(rest, "import <fichier>")?;
+            let text = match std::fs::read_to_string(file) {
+                Ok(text) => text,
+                Err(e) => return msg(format!("{file} : {e}")),
+            };
+            let count = store::import_config(&text).or_else(msg)?;
+            println!("configuration importée ({count} fichiers) ; « omnictl apply » remet les couleurs touche par touche");
         }
         "list" => {
             args.allow(&[])?;

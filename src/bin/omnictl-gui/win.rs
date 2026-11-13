@@ -1015,6 +1015,83 @@ pub fn reg_delete_tree(subkey: &str) {
     unsafe { RegDeleteTreeW(HKCU as HANDLE, wide(subkey).as_ptr()) };
 }
 
+#[repr(C)]
+struct OpenFileName {
+    size: u32,
+    owner: HWND,
+    instance: HANDLE,
+    filter: *const u16,
+    custom_filter: *mut u16,
+    max_custom_filter: u32,
+    filter_index: u32,
+    file: *mut u16,
+    max_file: u32,
+    file_title: *mut u16,
+    max_file_title: u32,
+    initial_dir: *const u16,
+    title: *const u16,
+    flags: u32,
+    file_offset: u16,
+    file_extension: u16,
+    default_ext: *const u16,
+    cust_data: isize,
+    hook: *const c_void,
+    template_name: *const u16,
+    reserved_ptr: *mut c_void,
+    reserved: u32,
+    flags_ex: u32,
+}
+
+#[link(name = "comdlg32")]
+extern "system" {
+    fn GetSaveFileNameW(ofn: *mut OpenFileName) -> i32;
+    fn GetOpenFileNameW(ofn: *mut OpenFileName) -> i32;
+}
+
+/// Boîte de dialogue Windows « Enregistrer sous » (`save`) ou « Ouvrir » pour un fichier
+/// texte. `None` si l'utilisateur annule.
+pub fn file_dialog(owner: HWND, save: bool, title: &str, default_name: &str) -> Option<std::path::PathBuf> {
+    let filter: Vec<u16> = "Configuration omnictl (*.txt)\0*.txt\0Tous les fichiers\0*.*\0\0".encode_utf16().collect();
+    let mut file = [0u16; 1024];
+    for (slot, c) in file.iter_mut().zip(default_name.encode_utf16().take(1000)) {
+        *slot = c;
+    }
+    let (title, ext) = (wide(title), wide("txt"));
+    let mut ofn = OpenFileName {
+        size: std::mem::size_of::<OpenFileName>() as u32,
+        owner,
+        instance: null_mut(),
+        filter: filter.as_ptr(),
+        custom_filter: null_mut(),
+        max_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        max_file: file.len() as u32,
+        file_title: null_mut(),
+        max_file_title: 0,
+        initial_dir: null(),
+        title: title.as_ptr(),
+        // OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR, plus écrasement confirmé ou
+        // fichier existant exigé.
+        flags: 0x8_0000 | 0x800 | 0x8 | if save { 0x2 } else { 0x1000 },
+        file_offset: 0,
+        file_extension: 0,
+        default_ext: ext.as_ptr(),
+        cust_data: 0,
+        hook: null(),
+        template_name: null(),
+        reserved_ptr: null_mut(),
+        reserved: 0,
+        flags_ex: 0,
+    };
+    let ok = unsafe { if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) } };
+    if ok == 0 {
+        return None;
+    }
+    let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&file[..len])))
+}
+
 /// Question Oui / Non. Vrai si l'utilisateur répond Oui.
 pub fn confirm(text: &str) -> bool {
     unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("omnictl").as_ptr(), 0x24) == 6 }

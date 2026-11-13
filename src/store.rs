@@ -206,9 +206,148 @@ pub fn set_guard(on: bool) -> std::io::Result<()> {
     set_flag("guard", on)
 }
 
+// ───────────── Export / import de toute la configuration ─────────────
+//
+// Un seul fichier texte, lisible : une ligne d'en-tête, puis chaque fichier de réglages sous
+// la forme `[nom]` suivi de son contenu, chaque ligne préfixée par `| `.
+
+const EXPORT_HEADER: &str = "# omnictl configuration 1";
+/// Réglages propres à un PC, jamais exportés : le gardien va avec un démarrage automatique.
+const LOCAL_ONLY: &[&str] = &["guard"];
+
+/// Nom d'entrée acceptable : `fichier` ou `apps/fichier`, caractères sûrs uniquement. Le
+/// fichier importé peut venir d'ailleurs : rien ne doit pouvoir écrire hors du dossier.
+fn entry_ok(name: &str) -> bool {
+    let file = name.strip_prefix("apps/").unwrap_or(name);
+    !file.is_empty()
+        && !file.starts_with('.')
+        && file.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !LOCAL_ONLY.contains(&name)
+}
+
+/// Fichiers de réglages du dossier `dir`, par nom d'entrée.
+fn config_files(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for (prefix, sub) in [("", dir.to_path_buf()), ("apps/", dir.join("apps"))] {
+        for entry in std::fs::read_dir(&sub).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Some(file) = entry.file_name().to_str().map(str::to_string) else { continue };
+            let name = format!("{prefix}{file}");
+            if path.is_file() && entry_ok(&name) {
+                out.push((name, path));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn export_dir(dir: &std::path::Path) -> String {
+    let mut out = format!("{EXPORT_HEADER}\n");
+    for (name, path) in config_files(dir) {
+        out.push_str(&format!("[{name}]\n"));
+        for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+            out.push_str(&format!("| {line}\n"));
+        }
+    }
+    out
+}
+
+/// Lit un export : liste (nom, contenu). Erreur si le fichier n'en est pas un.
+fn parse_export(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut lines = text.trim_start_matches('\u{FEFF}').lines();
+    if lines.next().map(str::trim) != Some(EXPORT_HEADER) {
+        return Err("ce fichier n'est pas un export de configuration omnictl".into());
+    }
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            if !entry_ok(name) {
+                return Err(format!("entrée refusée : {name}"));
+            }
+            entries.push((name.to_string(), String::new()));
+        } else if let Some(content) = line.strip_prefix("| ").or(line.strip_prefix("|").filter(|r| r.is_empty())) {
+            let (_, body) = entries.last_mut().ok_or("contenu avant la première entrée")?;
+            body.push_str(content);
+            body.push('\n');
+        } else if !line.trim().is_empty() {
+            return Err(format!("ligne inattendue : {line}"));
+        }
+    }
+    Ok(entries)
+}
+
+/// Remplace la configuration de `dir` par celle de l'export (les réglages propres au PC
+/// restent). Tout est vérifié avant d'écrire quoi que ce soit.
+fn import_dir(dir: &std::path::Path, text: &str) -> Result<usize, String> {
+    let entries = parse_export(text)?;
+    let io = |e: std::io::Error| format!("écriture impossible : {e}");
+    std::fs::create_dir_all(dir.join("apps")).map_err(io)?;
+    for (_, path) in config_files(dir) {
+        std::fs::remove_file(path).map_err(io)?;
+    }
+    for (name, body) in &entries {
+        std::fs::write(dir.join(name), body).map_err(io)?;
+    }
+    Ok(entries.len())
+}
+
+fn config_dir() -> Result<PathBuf, String> {
+    path().and_then(|p| p.parent().map(PathBuf::from)).ok_or_else(|| "dossier de configuration introuvable".into())
+}
+
+/// Toute la configuration (couleurs par touche, profils par application, dégradé, réglages
+/// de l'interface) dans un seul texte, à enregistrer dans un fichier.
+pub fn export_config() -> Result<String, String> {
+    Ok(export_dir(&config_dir()?))
+}
+
+/// Remplace la configuration par un export. Renvoie le nombre de fichiers restaurés.
+pub fn import_config(text: &str) -> Result<usize, String> {
+    import_dir(&config_dir()?, text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_import_round_trip() {
+        let base = std::env::temp_dir().join(format!("omnictl-test-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(a.join("apps")).unwrap();
+        std::fs::write(a.join("keys.txt"), "2d=ff6000\n08=0040ff,w\n").unwrap();
+        std::fs::write(a.join("gradient"), "ff0000,0000ff;1").unwrap();
+        std::fs::write(a.join("react"), "2").unwrap();
+        std::fs::write(a.join("guard"), "").unwrap();
+        std::fs::write(a.join("apps").join("game.exe.txt"), "10=ffffff\n").unwrap();
+        let text = export_dir(&a);
+        assert!(!text.contains("[guard]"), "réglage propre au PC exporté");
+
+        std::fs::create_dir_all(b.join("apps")).unwrap();
+        std::fs::write(b.join("apps").join("old.exe.txt"), "10=000000\n").unwrap();
+        std::fs::write(b.join("guard"), "").unwrap();
+        assert_eq!(import_dir(&b, &text), Ok(4));
+        assert_eq!(std::fs::read_to_string(b.join("keys.txt")).unwrap(), "2d=ff6000\n08=0040ff,w\n");
+        assert_eq!(std::fs::read_to_string(b.join("gradient")).unwrap().trim(), "ff0000,0000ff;1");
+        assert!(b.join("apps").join("game.exe.txt").exists());
+        assert!(!b.join("apps").join("old.exe.txt").exists(), "l'import remplace les profils");
+        assert!(b.join("guard").exists(), "le gardien du PC reste tel quel");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn hostile_exports_are_rejected() {
+        let h = EXPORT_HEADER;
+        assert!(parse_export("bonjour").is_err());
+        assert!(parse_export(&format!("{h}\n[../evil]\n| x\n")).is_err());
+        assert!(parse_export(&format!("{h}\n[apps/../../x]\n")).is_err());
+        assert!(parse_export(&format!("{h}\n[C:\\x]\n")).is_err());
+        assert!(parse_export(&format!("{h}\n[guard]\n")).is_err());
+        assert!(parse_export(&format!("{h}\n| sans entrée\n")).is_err());
+        assert_eq!(parse_export(&format!("\u{FEFF}{h}\r\n[react]\r\n| 2\r\n")), Ok(vec![("react".into(), "2\n".into())]));
+    }
 
     #[test]
     fn lines_round_trip() {

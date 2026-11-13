@@ -64,7 +64,10 @@ de l'horloge (clic pour la rouvrir, clic droit pour quitter) et ne s'ouvre qu'en
   atténuation automatique quand le PC est inactif ou verrouillé, vue du clavier en noir ou blanc.
 - *Applications* : des couleurs différentes selon le logiciel au premier plan.
 - *Réglages* : profil embarqué, mise en veille, économie d'énergie, alerte batterie,
-  éclairage dynamique Windows.
+  éclairage dynamique Windows, et **export / import de la configuration** : couleurs par
+  touche, profils par application et réglages de l'interface dans un seul fichier texte, à
+  réimporter sur un autre PC (le mode gardien, propre à chaque PC, n'est pas exporté).
+  Les effets enregistrés dans le clavier n'en font pas partie : ils voyagent avec le clavier.
 
 **Souris** : effet, couleur et luminosité de la LED, synchronisation avec le clavier, DPI des
 quatre paliers et fréquence de scrutation.
@@ -87,6 +90,7 @@ omnictl effect breathing rouge bleu --speed slow
 omnictl effect wave --direction right
 omnictl keys --base 101010 zqsd=rouge esc=blanc space=cyan arrows=orange
 omnictl apply
+omnictl export ma-config.txt      # puis, sur l'autre PC : omnictl import ma-config.txt
 omnictl sleep 10
 omnictl help
 ```

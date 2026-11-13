@@ -903,6 +903,9 @@ enum Hit {
     Update,
     /// Installer l'application sur ce PC.
     Install,
+    /// Exporter / importer toute la configuration.
+    Export,
+    Import,
     /// Palier DPI (0 à 3) : diminuer (faux) ou augmenter (vrai).
     MouseDpi(usize, bool),
     MousePolling(usize),
@@ -1588,6 +1591,28 @@ impl App {
             Hit::MouseLevel(level) => self.edit_mouse(|m| m.level = level),
             Hit::MouseColor => self.picker = Some(Picker::new(PickTarget::MouseColor, self.mouse_fx.color)),
             Hit::MouseSave => self.send(Cmd::MouseSave(self.mouse_fx)),
+            Hit::Export => {
+                if let Some(file) = win::file_dialog(self.hwnd, true, "Exporter la configuration", "omnictl-config.txt") {
+                    let result = store::export_config().and_then(|text| std::fs::write(&file, text).map_err(|e| e.to_string()));
+                    (self.message, self.is_error) = match result {
+                        Ok(()) => (format!("Configuration exportée dans {}.", file.display()), false),
+                        Err(e) => (format!("Export impossible : {e}"), true),
+                    };
+                }
+            }
+            Hit::Import => {
+                let file = win::file_dialog(self.hwnd, false, "Importer une configuration", "");
+                if let Some(file) = file {
+                    if win::confirm("Remplacer la configuration actuelle par celle de ce fichier ?\n\nCouleurs par touche, profils par application et réglages de l'interface seront remplacés.") {
+                        let result = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|text| store::import_config(&text));
+                        match result {
+                            // Relancer l'application : tout est relu depuis la nouvelle configuration.
+                            Ok(_) => win::post(self.hwnd as usize, WM_RESTART),
+                            Err(e) => (self.message, self.is_error) = (format!("Import impossible : {e}"), true),
+                        }
+                    }
+                }
+            }
             Hit::Install => match install::install() {
                 Ok(exe) => {
                     // Passer la main à la copie installée.
@@ -2119,6 +2144,15 @@ impl App {
         let mut chars = lever.chars();
         let lever: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
         ui.c.text(&lever, rc(right - 260.0, row(5), 260.0, ROW), 14.0, false, t.text, Align::Right);
+
+        let right = ui.setting(
+            row(6),
+            ICON_SYNC,
+            "Configuration de l'application",
+            "Couleurs par touche, profils par application, réglages : un fichier à emporter.",
+        );
+        ui.button(rc(right - 120.0, mid(6) - 16.0, 120.0, 32.0), "Importer…", false, Hit::Import);
+        ui.button(rc(right - 252.0, mid(6) - 16.0, 120.0, 32.0), "Exporter…", false, Hit::Export);
     }
 
     fn draw_mouse(&self, ui: &mut Ui) {
