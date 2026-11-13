@@ -56,6 +56,85 @@ fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
     Some(res)
 }
 
+const RT_VERSION: u16 = 16;
+
+fn utf16z(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+fn pad4(out: &mut Vec<u8>) {
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+}
+
+/// Un bloc de la ressource de version : longueur, longueur de la valeur, type, clé,
+/// valeur, puis les blocs enfants, chaque partie alignée sur 4 octets.
+fn version_block(key: &str, value: &[u8], value_len: u16, text: bool, children: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = vec![0, 0];
+    out.extend_from_slice(&value_len.to_le_bytes());
+    out.extend_from_slice(&(text as u16).to_le_bytes());
+    out.extend_from_slice(&utf16z(key));
+    pad4(&mut out);
+    out.extend_from_slice(value);
+    for child in children {
+        pad4(&mut out);
+        out.extend_from_slice(child);
+    }
+    let len = out.len() as u16;
+    out[..2].copy_from_slice(&len.to_le_bytes());
+    out
+}
+
+/// Ressource VERSIONINFO : nom du produit, éditeur, description et version, affichés par
+/// l'Explorateur (Propriétés > Détails) et exigés pour la signature du code.
+fn version_info(file_name: &str, description: &str) -> Vec<u8> {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    let mut fixed = Vec::new();
+    for value in [
+        0xFEEF_04BDu32,         // signature
+        0x0001_0000,            // version de la structure
+        (major << 16) | minor,  // version du fichier
+        patch << 16,
+        (major << 16) | minor,  // version du produit
+        patch << 16,
+        0x3F,                   // masque des indicateurs
+        0,                      // indicateurs
+        0x0004_0004,            // Windows NT
+        1,                      // application
+        0,
+        0,
+        0,
+    ] {
+        fixed.extend_from_slice(&value.to_le_bytes());
+    }
+    let full_version = format!("{version}.0");
+    let strings: Vec<Vec<u8>> = [
+        ("CompanyName", "omnictl"),
+        ("FileDescription", description),
+        ("FileVersion", full_version.as_str()),
+        ("InternalName", file_name.trim_end_matches(".exe")),
+        ("LegalCopyright", "GPL-2.0-or-later"),
+        ("OriginalFilename", file_name),
+        ("ProductName", "omnictl"),
+        ("ProductVersion", full_version.as_str()),
+    ]
+    .iter()
+    .map(|(key, value)| {
+        let data = utf16z(value);
+        version_block(key, &data, (data.len() / 2) as u16, true, &[])
+    })
+    .collect();
+    let table = version_block("040904B0", &[], 0, true, &strings);
+    let string_info = version_block("StringFileInfo", &[], 0, true, &[table]);
+    let translation = [0x09, 0x04, 0xB0, 0x04]; // anglais, Unicode
+    let var = version_block("Translation", &translation, 4, false, &[]);
+    let var_info = version_block("VarFileInfo", &[], 0, true, &[var]);
+    version_block("VS_VERSION_INFO", &fixed, fixed.len() as u16, false, &[string_info, var_info])
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=assets/omnictl.ico");
     println!("cargo:rerun-if-changed=build.rs");
@@ -63,8 +142,16 @@ fn main() {
         return;
     }
     let ico = std::fs::read("assets/omnictl.ico").expect("assets/omnictl.ico introuvable");
-    let res = ico_to_res(&ico).expect("assets/omnictl.ico : fichier d'icône invalide");
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("omnictl.res");
-    std::fs::write(&out, res).expect("écriture du fichier de ressources");
-    println!("cargo:rustc-link-arg-bins={}", out.display());
+    let icons = ico_to_res(&ico).expect("assets/omnictl.ico : fichier d'icône invalide");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    for (bin, description) in [
+        ("omnictl", "omnictl - ROG keyboard and mouse control (command line, MCP)"),
+        ("omnictl-gui", "omnictl - ROG keyboard and mouse control"),
+    ] {
+        let mut res = icons.clone();
+        resource(&mut res, RT_VERSION, 1, &version_info(&format!("{bin}.exe"), description));
+        let out = out_dir.join(format!("{bin}.res"));
+        std::fs::write(&out, res).expect("écriture du fichier de ressources");
+        println!("cargo:rustc-link-arg-bin={bin}={}", out.display());
+    }
 }

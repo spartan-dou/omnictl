@@ -48,6 +48,33 @@ jobs:
           Get-ChildItem dist | Select-Object Name, Length
           Get-Content dist/SHA256SUMS.txt
 
+      # ── Signature (SignPath Foundation, gratuite pour les projets libres) ──
+      # Active seulement pour une release, et seulement une fois le projet accepté : il faut
+      # alors la variable SIGNPATH_ORGANIZATION_ID et le secret SIGNPATH_API_TOKEN dans les
+      # réglages du dépôt. Chaque demande attend l'approbation du mainteneur sur SignPath.
+      # Sans eux, la compilation continue sans signer.
+      - name: Exécutables à signer
+        id: unsigned_exe
+        if: startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: dist/*.exe
+
+      - name: Signature des exécutables
+        if: steps.unsigned_exe.outcome == 'success'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: omnictl
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: initial
+          github-artifact-id: ${{ steps.unsigned_exe.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist
+
       # Installeur MSI (Program Files, pour tout le PC), compilé avec WiX Toolset.
       - name: Paquets MSI
         shell: pwsh
@@ -72,6 +99,35 @@ jobs:
             Compress-Archive -Path "$dir/*" -DestinationPath dist/omnictl-portable-$arch.zip
           }
           Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Paquets MSI à signer
+        id: unsigned_msi
+        if: steps.unsigned_exe.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-msi
+          path: dist/*.msi
+
+      - name: Signature des paquets MSI
+        if: steps.unsigned_msi.outcome == 'success'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: omnictl
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: initial
+          github-artifact-id: ${{ steps.unsigned_msi.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist
+
+      - name: Vérification des signatures
+        if: steps.unsigned_exe.outcome == 'success'
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem dist/*.exe, dist/*.msi | Where-Object { (Get-AuthenticodeSignature $_).Status -ne 'Valid' }
+          if ($bad) { $bad.Name; throw "fichiers non signés" }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -130,6 +186,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          # Seulement les fichiers finaux, pas les copies envoyées à la signature.
+          pattern: omnictl-*
           merge-multiple: true
 
       - name: Empreintes et numéro de version

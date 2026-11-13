@@ -171,7 +171,8 @@ Les exécutables sont produits dans `dist\`.
 
 ### Smart App Control
 
-Les exécutables ne sont pas signés. Sur une machine où Smart App Control est actif, Windows
+La signature gratuite par la SignPath Foundation est en préparation (voir
+[CODE_SIGNING.md](CODE_SIGNING.md)) ; en attendant, les exécutables ne sont pas signés. Sur une machine où Smart App Control est actif, Windows
 peut refuser de les lancer, et son verdict varie d'une compilation à l'autre. Il n'existe
 pas d'exception par application : il faut soit le désactiver (réglage définitif, Defender
 et SmartScreen restent actifs), soit signer les exécutables.
