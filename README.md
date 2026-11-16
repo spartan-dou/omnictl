@@ -33,7 +33,12 @@ Trois façons de l'utiliser :
 **Portable** (PC professionnel, clé USB) : dézippez `omnictl-portable-x64.zip` où vous voulez et
 lancez `omnictl-gui.exe`. Le fichier `portable.txt` à côté indique à l'application de ne rien
 écrire sur le PC : ses réglages vont dans le dossier `settings` voisin. Le dossier entier peut
-donc passer d'un PC à l'autre avec vos couleurs. Les mises à jour remplacent les fichiers sur place.
+donc passer d'un PC à l'autre avec vos couleurs. `portable.txt` décrit aussi tout ce que
+l'application fait sur le PC (droits, programmes, fichiers, registre, réseau), à transmettre au
+service informatique au besoin. Les mises à jour remplacent les fichiers sur place, sur clic
+uniquement. En portable, « Garder ces couleurs » (démarrage automatique) écrit une entrée de
+registre distincte (`omnictl-portable`) qui pointe vers l'exe : à décocher avant de retirer ou
+déplacer le dossier.
 
 **MSI** : `omnictl-x64.msi` installe dans `Program Files` pour tous les utilisateurs, avec raccourci
 dans le menu Démarrer et désinstallation depuis Paramètres → Applications. C'est le format que
@@ -47,8 +52,11 @@ le nouveau MSI, vérifie son empreinte et le lance (Windows demande alors l'acco
 conservés à la désinstallation. Elle fonctionne aussi sans être installée.
 
 L'interface vérifie au démarrage si une version plus récente est publiée ici et propose de
-l'installer : un clic télécharge les fichiers, contrôle leur empreinte SHA-256, les remplace
-et relance l'application. Rien n'est installé sans ce clic.
+l'installer : un clic télécharge les fichiers **en mémoire** (rien n'est déposé dans `%TEMP%`),
+contrôle leur empreinte SHA-256, les remplace et relance l'application. Rien n'est installé sans
+ce clic. Le téléchargement passe par WinHTTP (proxy et inspection TLS de Windows pris en compte).
+Sur un PC professionnel qui n'autorise pas les sorties vers GitHub, décochez *Réglages →
+« Vérifier les mises à jour au démarrage »* : l'application ne contacte alors plus GitHub.
 
 ## Interface graphique
 
@@ -65,7 +73,8 @@ et de la souris) et ne s'ouvre qu'en un exemplaire.
   atténuation automatique quand le PC est inactif ou verrouillé, vue du clavier en noir ou blanc.
 - *Applications* : des couleurs différentes selon le logiciel au premier plan.
 - *Réglages* : profil embarqué, mise en veille, économie d'énergie, alerte batterie,
-  éclairage dynamique Windows, et **export / import de la configuration** : couleurs par
+  éclairage dynamique Windows, **vérification des mises à jour au démarrage** (décochable), et
+  **export / import de la configuration** : couleurs par
   touche, profils par application et réglages de l'interface dans un seul fichier texte, à
   réimporter sur un autre PC (le mode gardien, propre à chaque PC, n'est pas exporté).
   Les effets enregistrés dans le clavier n'en font pas partie : ils voyagent avec le clavier.
