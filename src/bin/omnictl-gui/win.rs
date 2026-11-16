@@ -881,14 +881,40 @@ extern "system" {
     fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
 }
 
-#[link(name = "urlmon")]
-extern "system" {
-    fn URLDownloadToFileW(caller: *mut c_void, url: *const u16, file: *const u16, reserved: u32, callback: *mut c_void) -> i32;
+// Téléchargement des mises à jour par WinHTTP : tout est lu en mémoire, aucun exécutable n'est
+// écrit dans %TEMP% (seul l'installeur MSI, qui doit être un fichier, y est déposé). WinHTTP
+// suit l'inspection TLS et le proxy configurés dans Windows, et vérifie la chaîne du certificat.
+#[repr(C)]
+struct UrlComponents {
+    struct_size: u32,
+    scheme: *const u16,
+    scheme_len: u32,
+    n_scheme: i32,
+    host: *const u16,
+    host_len: u32,
+    port: u16,
+    user: *const u16,
+    user_len: u32,
+    pass: *const u16,
+    pass_len: u32,
+    path: *const u16,
+    path_len: u32,
+    extra: *const u16,
+    extra_len: u32,
 }
 
-#[link(name = "wininet")]
+#[link(name = "winhttp")]
 extern "system" {
-    fn DeleteUrlCacheEntryW(url: *const u16) -> i32;
+    fn WinHttpOpen(agent: *const u16, access: u32, proxy: *const u16, bypass: *const u16, flags: u32) -> HANDLE;
+    fn WinHttpCloseHandle(handle: HANDLE) -> i32;
+    fn WinHttpConnect(session: HANDLE, host: *const u16, port: u16, reserved: u32) -> HANDLE;
+    fn WinHttpOpenRequest(connect: HANDLE, verb: *const u16, object: *const u16, version: *const u16, referrer: *const u16, accept: *const *const u16, flags: u32) -> HANDLE;
+    fn WinHttpSendRequest(req: HANDLE, headers: *const u16, headers_len: u32, optional: *const c_void, optional_len: u32, total_len: u32, context: usize) -> i32;
+    fn WinHttpReceiveResponse(req: HANDLE, reserved: *mut c_void) -> i32;
+    fn WinHttpQueryHeaders(req: HANDLE, info: u32, name: *const u16, buffer: *mut c_void, buffer_len: *mut u32, index: *mut u32) -> i32;
+    fn WinHttpQueryDataAvailable(req: HANDLE, available: *mut u32) -> i32;
+    fn WinHttpReadData(req: HANDLE, buffer: *mut c_void, to_read: u32, read: *mut u32) -> i32;
+    fn WinHttpCrackUrl(url: *const u16, url_len: u32, flags: u32, comps: *mut UrlComponents) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -914,13 +940,99 @@ pub fn already_running(show_msg: u32) -> bool {
     }
 }
 
-/// Télécharge `url` dans le fichier `to` (HTTPS, réglages réseau de Windows).
-pub fn download(url: &str, to: &std::path::Path) -> bool {
-    let url = wide(url);
-    let Some(path) = to.to_str() else { return false };
+/// Télécharge `url` en mémoire (HTTPS, proxy et inspection TLS de Windows). `None` si le
+/// réseau échoue ou si la réponse n'est pas « 200 ». Rien n'est écrit sur le disque : une
+/// mise à jour ne dépose pas d'exécutable dans %TEMP%.
+pub fn download_mem(url: &str) -> Option<Vec<u8>> {
+    const SECURE: u32 = 0x0080_0000; // WINHTTP_FLAG_SECURE
+    const AUTOMATIC_PROXY: u32 = 4; // WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+
+    let url_w = wide(url);
+    // Découpe l'URL en hôte + chemin : pointeurs à null et longueurs non nulles, WinHttpCrackUrl
+    // renvoie alors des tranches de `url_w`.
+    let mut c: UrlComponents = unsafe { std::mem::zeroed() };
+    c.struct_size = std::mem::size_of::<UrlComponents>() as u32;
+    c.scheme_len = 1;
+    c.host_len = 1;
+    c.path_len = 1;
+    c.extra_len = 1;
+    if unsafe { WinHttpCrackUrl(url_w.as_ptr(), 0, 0, &mut c) } == 0 || c.host.is_null() {
+        return None;
+    }
+    let with_nul = |ptr: *const u16, len: usize| -> Vec<u16> {
+        let mut v: Vec<u16> = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        v.push(0);
+        v
+    };
+    let host = with_nul(c.host, c.host_len as usize);
+    // Chemin + éventuelle requête (contigus dans l'URL d'origine). "/" si le chemin est vide.
+    let obj_len = c.path_len as usize + c.extra_len as usize;
+    let object = if obj_len == 0 || c.path.is_null() { wide("/") } else { with_nul(c.path, obj_len) };
+    let secure = if c.n_scheme == 2 { SECURE } else { 0 }; // INTERNET_SCHEME_HTTPS
+
+    let agent = wide(concat!("omnictl/", env!("CARGO_PKG_VERSION")));
+    let verb = wide("GET");
     unsafe {
-        DeleteUrlCacheEntryW(url.as_ptr()); // toujours la version en ligne, pas une copie en cache
-        URLDownloadToFileW(null_mut(), url.as_ptr(), wide(path).as_ptr(), 0, null_mut()) == 0
+        let session = WinHttpOpen(agent.as_ptr(), AUTOMATIC_PROXY, null(), null(), 0);
+        if session.is_null() {
+            return None;
+        }
+        let out = (|| {
+            let connect = WinHttpConnect(session, host.as_ptr(), c.port, 0);
+            if connect.is_null() {
+                return None;
+            }
+            let req = WinHttpOpenRequest(connect, verb.as_ptr(), object.as_ptr(), null(), null(), null(), secure);
+            let data = if req.is_null() {
+                None
+            } else {
+                let d = read_response(req);
+                WinHttpCloseHandle(req);
+                d
+            };
+            WinHttpCloseHandle(connect);
+            data
+        })();
+        WinHttpCloseHandle(session);
+        out
+    }
+}
+
+/// Envoie la requête préparée et lit tout le corps de la réponse, si le statut est 200.
+unsafe fn read_response(req: HANDLE) -> Option<Vec<u8>> {
+    const QUERY_STATUS_CODE: u32 = 19;
+    const QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+    const MAX_BYTES: usize = 64 * 1024 * 1024; // une release d'omnictl ne dépasse pas quelques Mo
+    if WinHttpSendRequest(req, null(), 0, null(), 0, 0, 0) == 0 || WinHttpReceiveResponse(req, null_mut()) == 0 {
+        return None;
+    }
+    let mut status: u32 = 0;
+    let mut len = 4u32;
+    if WinHttpQueryHeaders(req, QUERY_STATUS_CODE | QUERY_FLAG_NUMBER, null(), &mut status as *mut u32 as *mut c_void, &mut len, null_mut()) == 0 || status != 200 {
+        return None;
+    }
+    let mut data: Vec<u8> = Vec::new();
+    loop {
+        let mut avail = 0u32;
+        if WinHttpQueryDataAvailable(req, &mut avail) == 0 {
+            return None;
+        }
+        if avail == 0 {
+            return Some(data);
+        }
+        if data.len() + avail as usize > MAX_BYTES {
+            return None;
+        }
+        let start = data.len();
+        data.resize(start + avail as usize, 0);
+        let mut read = 0u32;
+        if WinHttpReadData(req, data[start..].as_mut_ptr() as *mut c_void, avail, &mut read) == 0 {
+            return None;
+        }
+        data.truncate(start + read as usize);
+        if read == 0 {
+            return Some(data);
+        }
     }
 }
 

@@ -910,6 +910,8 @@ enum Hit {
     Saving(u8),
     Low,
     Wdl,
+    /// Vérifier les mises à jour au démarrage.
+    UpdateCheck,
     MouseMode(MouseMode),
     MouseColor,
     MouseLevel(u8),
@@ -980,6 +982,7 @@ const ICON_WHEEL: char = '\u{E767}';
 const ICON_PIN: char = '\u{E840}';
 const ICON_SYNC: char = '\u{E895}';
 const ICON_EFFECT: char = '\u{EA80}';
+const ICON_UPDATE: char = '\u{E777}';
 
 struct Ui<'a> {
     c: &'a Canvas,
@@ -1196,6 +1199,8 @@ struct App {
     guard: bool,
     /// Le clavier de l'utilisateur est la version blanche.
     white: bool,
+    /// Vérifier les mises à jour sur GitHub au démarrage (désactivable sur un PC professionnel).
+    update_check: bool,
     hits: Vec<(Rc, Hit)>,
     hover: Option<Hit>,
     drag: Option<Hit>,
@@ -1326,7 +1331,10 @@ impl App {
         self.guard = on;
         let _ = store::set_guard(on);
         let command = std::env::current_exe().ok().map(|exe| format!("\"{}\" --background", exe.display()));
-        win::set_autostart("omnictl", if on { command.as_deref() } else { None });
+        // La version portable a sa propre entrée de démarrage : elle ne touche jamais celle
+        // d'une copie installée sur le même PC (et son chemin suit l'exe, clé USB comprise).
+        let name = if matches!(self.kind, install::Kind::Portable) { "omnictl-portable" } else { "omnictl" };
+        win::set_autostart(name, if on { command.as_deref() } else { None });
         self.send(Cmd::Guard(on));
     }
 
@@ -1609,6 +1617,15 @@ impl App {
                 if let Some(s) = &self.snap {
                     self.send(Cmd::Wdl(!s.wdl));
                 }
+            }
+            Hit::UpdateCheck => {
+                self.update_check = !self.update_check;
+                let _ = store::set_flag("no_update_check", !self.update_check);
+                (self.message, self.is_error) = if self.update_check {
+                    ("Vérification des mises à jour activée (au prochain démarrage).".into(), false)
+                } else {
+                    ("omnictl ne contactera plus GitHub pour les mises à jour.".into(), false)
+                };
             }
             Hit::MouseMode(mode) => self.edit_mouse(|m| m.mode = mode),
             Hit::MouseLevel(level) => self.edit_mouse(|m| m.level = level),
@@ -2176,6 +2193,14 @@ impl App {
         );
         ui.button(rc(right - 120.0, mid(6) - 16.0, 120.0, 32.0), "Importer…", false, Hit::Import);
         ui.button(rc(right - 252.0, mid(6) - 16.0, 120.0, 32.0), "Exporter…", false, Hit::Export);
+
+        let right = ui.setting(
+            row(7),
+            ICON_UPDATE,
+            "Vérifier les mises à jour au démarrage",
+            "Cherche une version plus récente sur GitHub. Décoché, omnictl ne contacte pas GitHub.",
+        );
+        ui.toggle(right, mid(7), self.update_check, Hit::UpdateCheck);
     }
 
     fn draw_mouse(&self, ui: &mut Ui) {
@@ -2528,6 +2553,7 @@ pub fn main() {
         low_edit: None,
         guard,
         white: store::flag("white"),
+        update_check: !store::flag("no_update_check"),
         hits: Vec::new(),
         hover: None,
         drag: None,

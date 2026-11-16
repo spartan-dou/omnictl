@@ -1,7 +1,63 @@
-Version portable d'omnictl.
+omnictl - version portable
+==========================
 
-Tant que ce fichier est a cote de omnictl-gui.exe, l'application n'installe rien et
-garde ses reglages dans le dossier "settings" ici meme : le dossier peut vivre sur une
-cle USB ou dans un dossier synchronise, et passer d'un PC a l'autre avec les couleurs.
+Tant que ce fichier est a cote de omnictl-gui.exe, l'application n'installe rien et garde
+ses reglages dans le dossier "settings" ici meme : le dossier peut vivre sur une cle USB
+ou dans un dossier synchronise, et passer d'un PC a l'autre avec les couleurs.
 
+Pour la retirer : icone pres de l'horloge -> clic droit -> Quitter, puis supprimer le
+dossier. Si "Garder ces couleurs" a ete active, le decocher d'abord (voir Registre).
 Supprimer ce fichier rend l'application "normale" (reglages dans %APPDATA%\omnictl).
+
+
+Ce que l'application fait sur le PC
+-----------------------------------
+
+Droits
+  Ceux de l'utilisateur, jamais d'administrateur (manifeste "asInvoker").
+  Ni service, ni pilote, ni tache planifiee, ni extension du navigateur.
+
+Materiel
+  Dialogue avec le clavier et la souris ROG par USB HID (ou le dongle Omni 2,4 GHz).
+  Aucun autre peripherique n'est touche. Pas de mise a jour de firmware.
+
+Programmes lances
+  Aucun en fonctionnement normal : ni PowerShell, ni cmd, ni script. Seul s'ouvre, a la
+  demande et par le shell de Windows, le navigateur ou l'editeur (aide, page du projet).
+  (La desinstallation d'une copie INSTALLEE, elle, lance un cmd.exe bref pour effacer son
+  dossier ; la version portable ne s'installe pas et n'en a pas besoin.)
+
+Fichiers
+  Uniquement dans ce dossier (sous-dossier "settings"). Rien dans %APPDATA%, rien sur le
+  bureau. La configuration peut aussi etre exportee a la demande vers un fichier texte que
+  vous choisissez (menu Reglages -> Exporter).
+
+Registre (HKCU, le compte de l'utilisateur seulement)
+  - "Garder ces couleurs" (touche par touche) ecrit, SEULEMENT si vous l'activez, une
+    valeur "omnictl-portable" sous
+    Software\Microsoft\Windows\CurrentVersion\Run, pour relancer l'application a l'ouverture
+    de session. Decochez l'option avant de supprimer ou deplacer le dossier (sinon l'entree
+    pointe vers un chemin disparu). Cette valeur est distincte de celle d'une eventuelle
+    copie installee : la version portable n'y touche pas.
+  - Les dix effets integres et les reglages (veille, profil...) sont ecrits DANS LE CLAVIER
+    par USB, pas dans le registre.
+
+Reseau, en sortie uniquement (HTTPS, proxy et certificats geres par Windows via WinHTTP)
+  - Une fois au demarrage, api.github.com / github.com pour savoir si une version plus
+    recente est publiee. Decochable : Reglages -> "Verifier les mises a jour au demarrage".
+    Decoche, l'application ne contacte plus GitHub.
+  - Rien n'est telecharge ni remplace sans un clic sur "Mettre a jour" puis confirmation.
+    Le telechargement se fait en memoire (aucun exe depose dans %TEMP%) et chaque fichier
+    est verifie par son empreinte SHA-256 avant de remplacer l'executable.
+  - Aucun port reseau n'est ouvert. Le serveur MCP (option "omnictl mcp") parle uniquement
+    sur l'entree/sortie standard du processus.
+
+
+Verifier l'executable
+---------------------
+
+Code source : https://github.com/spartan-dou/omnictl
+Les empreintes des fichiers publies sont dans SHA256SUMS.txt (page Releases).
+Les executables Windows ne sont pas signes (voir SmartScreen / Smart App Control dans le
+README) : sur un PC qui n'autorise que les applications approuvees (AppLocker, WDAC), leur
+execution demande l'accord du service informatique.

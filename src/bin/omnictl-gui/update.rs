@@ -15,13 +15,9 @@ use std::path::{Path, PathBuf};
 const BASE: &str = "https://github.com/spartan-dou/omnictl/releases/latest/download/";
 const ARCH: &str = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
 
-/// Télécharge un fichier de la dernière release.
+/// Télécharge en mémoire un fichier de la dernière release (rien n'est écrit dans %TEMP%).
 fn fetch(name: &str) -> Option<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!("omnictl-update-{}-{name}", std::process::id()));
-    let ok = win::download(&format!("{BASE}{name}"), &tmp);
-    let data = if ok { std::fs::read(&tmp).ok() } else { None };
-    let _ = std::fs::remove_file(&tmp);
-    data
+    win::download_mem(&format!("{BASE}{name}"))
 }
 
 fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
@@ -50,6 +46,9 @@ fn hex(bytes: &[u8]) -> String {
 /// Numéro de la dernière version publiée, si elle est plus récente que celle qui tourne.
 /// `None` aussi quand le réseau ne répond pas : l'absence de mise à jour n'est pas une erreur.
 pub fn available() -> Option<String> {
+    if omnictl::store::flag("no_update_check") {
+        return None;
+    }
     let text = String::from_utf8(fetch("VERSION")?).ok()?;
     let latest = text.trim().trim_start_matches('v').to_string();
     is_newer(&latest, env!("CARGO_PKG_VERSION")).then_some(latest)
